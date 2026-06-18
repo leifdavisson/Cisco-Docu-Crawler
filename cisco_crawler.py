@@ -357,7 +357,7 @@ def connect_and_detect(ip, username, password, secret, conn_type="ssh"):
     
     if conn_type == 'telnet':
         # Optimize for slower/older Telnet connections and enable logging for troubleshooting
-        device['read_timeout'] = 60
+        device['auth_timeout'] = 60
         device['fast_cli'] = False
         device['session_log'] = os.path.join(RAW_LOGS_DIR, f"{ip}_telnet_session.log")
         
