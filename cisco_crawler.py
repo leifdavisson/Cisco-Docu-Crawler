@@ -25,6 +25,9 @@ import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from netaddr import IPNetwork, IPSet
 import time
+import queue
+import threading
+import re
 
 # Import local modules
 import oui_lookup
@@ -60,76 +63,103 @@ def check_nmap_installed():
     except FileNotFoundError:
         return False
 
+def validate_credentials(ip, ports, username, password, secret):
+    """
+    Validates credentials by attempting to connect to a single host.
+    Returns True if connection succeeds, False otherwise.
+    """
+    if 22 in ports:
+        try:
+            conn, _ = connect_and_detect(ip, username, password, secret, conn_type="ssh")
+            conn.disconnect()
+            return True
+        except Exception as e:
+            print(f"[*] Credential validation failed on {ip} via SSH: {e}")
+    if 23 in ports:
+        try:
+            conn, _ = connect_and_detect(ip, username, password, secret, conn_type="telnet")
+            conn.disconnect()
+            return True
+        except Exception as e:
+            print(f"[*] Credential validation failed on {ip} via Telnet: {e}")
+    return False
+
+def parse_nmap_grepable_line(line):
+    """Parses a single line of Nmap grepable output (-oG) to extract a host with open ports 22/23."""
+    if not line.startswith("Host:"):
+        return None
+    
+    parts = line.split("\t")
+    if len(parts) < 2:
+        return None
+    
+    host_part = parts[0]
+    ports_part = parts[1]
+    
+    if not ports_part.startswith("Ports:"):
+        return None
+        
+    ip_match = re.search(r"Host:\s+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", host_part)
+    if not ip_match:
+        return None
+    ip = ip_match.group(1)
+    
+    open_ports = []
+    for port_info in ports_part.replace("Ports:", "").split(","):
+        port_info = port_info.strip()
+        if "/open/" in port_info:
+            port_num = port_info.split("/")[0]
+            try:
+                open_ports.append(int(port_num))
+            except ValueError:
+                pass
+                
+    if open_ports:
+        return {"ip": ip, "mac": "", "ports": open_ports}
+    return None
+
 def run_nmap_scan(subnets):
     """
     Runs Nmap to scan subnets for ports 22 (SSH) and 23 (Telnet).
     Falls back to TCP Connect scan if not root.
+    Yields discovered hosts in real-time.
     """
-    targets = " ".join(subnets)
+    targets = subnets
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     xml_output = os.path.join(RAW_LOGS_DIR, f"nmap_results_{timestamp}.xml")
     
-    # Try SYN stealth scan first, fallback to TCP connect scan if non-root
     print(f"\nRunning Nmap scan on target subnets: {targets}")
     print(f"[*] Saving XML output to: {xml_output}")
-    cmd = ["nmap", "-sS", "-p", "22,23", "-Pn", "-oX", xml_output] + subnets
+    cmd = ["nmap", "-sS", "-p", "22,23", "-Pn", "-oG", "-", "-oX", xml_output] + targets
     
     try:
         print("[*] Starting Nmap SYN scan... (this may take a few minutes)")
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        if "You must be root" in result.stderr or result.returncode != 0:
-            print("[*] Non-root environment/permissions detected. Falling back to Nmap TCP Connect scan (-sT)...")
-            cmd = ["nmap", "-sT", "-p", "22,23", "-Pn", "-oX", xml_output] + subnets
-            print("[*] Starting Nmap TCP Connect scan... (this may take a few minutes)")
-            subprocess.run(cmd, check=True)
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+        
+        # Give Nmap a moment to start and check if it failed immediately (e.g. non-root error)
+        time.sleep(0.5)
+        if process.poll() is not None:
+            stderr_content = process.stderr.read()
+            if "You must be root" in stderr_content or "privileges" in stderr_content:
+                print("[*] Non-root environment/permissions detected. Falling back to Nmap TCP Connect scan (-sT)...")
+                cmd = ["nmap", "-sT", "-p", "22,23", "-Pn", "-oG", "-", "-oX", xml_output] + targets
+                print("[*] Starting Nmap TCP Connect scan... (this may take a few minutes)")
+                process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+            else:
+                print(f"[!] Nmap failed to start: {stderr_content}")
+                return
+        
+        # Read stdout in real-time
+        for line in process.stdout:
+            res = parse_nmap_grepable_line(line)
+            if res:
+                yield res
+                
+        process.stdout.close()
+        process.wait()
         print("[✓] Nmap scan completed successfully.")
-    except subprocess.CalledProcessError as e:
-        print(f"[!] Nmap scan failed: {e}")
-        return []
-
-    return parse_nmap_xml(xml_output)
-
-def parse_nmap_xml(xml_file):
-    """Parses Nmap XML output to extract hosts with open port 22 or 23."""
-    hosts = []
-    if not os.path.exists(xml_file):
-        return hosts
-        
-    try:
-        tree = ET.parse(xml_file)
-        root = tree.getroot()
-        
-        for host in root.findall('host'):
-            ip = ""
-            mac = ""
-            ports = []
-            
-            # Extract IP and MAC
-            for addr in host.findall('address'):
-                addr_type = addr.get('addrtype')
-                if addr_type == 'ipv4':
-                    ip = addr.get('addr')
-                elif addr_type == 'mac':
-                    mac = addr.get('addr')
-                    
-            # Extract ports
-            ports_elem = host.find('ports')
-            if ports_elem is not None:
-                for port in ports_elem.findall('port'):
-                    state = port.find('state').get('state')
-                    if state == 'open':
-                        ports.append(int(port.get('portid')))
-                        
-            if ip and ports:
-                hosts.append({
-                    "ip": ip,
-                    "mac": mac,
-                    "ports": ports
-                })
     except Exception as e:
-        print(f"Error parsing Nmap XML: {e}")
-        
-    return hosts
+        print(f"[!] Nmap scan error: {e}")
 
 def python_port_scan_worker(ip, ports):
     """Worker thread to scan ports 22 and 23 on a single IP."""
@@ -150,9 +180,8 @@ def python_port_scan_worker(ip, ports):
     return None
 
 def run_python_port_scan(subnets):
-    """Fallback multi-threaded Python TCP port scanner if Nmap is not installed."""
+    """Fallback multi-threaded Python TCP port scanner if Nmap is not installed. Yields discovered hosts in real-time."""
     print("Nmap not found. Falling back to internal Python multi-threaded port scanner...")
-    discovered = []
     ips_to_scan = []
     
     for subnet in subnets:
@@ -168,16 +197,14 @@ def run_python_port_scan(subnets):
             
     print(f"Scanning {len(ips_to_scan)} IP addresses on ports 22 and 23...")
     
-    # Run scan with thread pool
+    # Run scan with thread pool and yield results as they finish
     with ThreadPoolExecutor(max_workers=50) as executor:
         futures = {executor.submit(python_port_scan_worker, ip, [22, 23]): ip for ip in ips_to_scan}
         for future in as_completed(futures):
             res = future.result()
             if res:
-                discovered.append(res)
                 print(f"  Discovered active host: {res['ip']} (Open ports: {res['ports']})")
-                
-    return discovered
+                yield res
 
 def connect_and_detect(ip, username, password, secret, conn_type="ssh"):
     """
@@ -415,7 +442,7 @@ def main():
     if not os.path.exists(oui_lookup.OUI_FILE):
         oui_lookup.download_oui_db()
         
-    targets = []
+    host_generator = None
     
     if args.retry:
         if not os.path.exists(args.retry):
@@ -426,9 +453,11 @@ def main():
                 failed_data = json.load(f)
                 targets_ips = failed_data.get("failed_ips", [])
                 print(f"Loaded {len(targets_ips)} failed hosts from {args.retry} for retry.")
-                # We format them as mock scan discoveries
-                for ip in targets_ips:
-                    targets.append({"ip": ip, "mac": "", "ports": [22, 23]})
+                
+                def retry_generator():
+                    for ip in targets_ips:
+                        yield {"ip": ip, "mac": "", "ports": [22, 23]}
+                host_generator = retry_generator()
         except Exception as e:
             print(f"Error reading retry file: {e}")
             sys.exit(1)
@@ -459,48 +488,100 @@ def main():
             
         print("\n--- Phase 1: Subnet Discovery ---")
         if check_nmap_installed():
-            targets = run_nmap_scan(valid_subnets)
+            host_generator = run_nmap_scan(valid_subnets)
         else:
-            targets = run_python_port_scan(valid_subnets)
+            host_generator = run_python_port_scan(valid_subnets)
             
-        print(f"Discovered {len(targets)} active hosts with open SSH/Telnet ports.")
-        if not targets:
-            print("No switch management ports (22/23) found. Exiting.")
-            sys.exit(1)
+    # Set up generator iterator
+    iterator = iter(host_generator)
+    first_host = None
+    try:
+        first_host = next(iterator)
+    except StopIteration:
+        pass
+        
+    if not first_host:
+        print("No switch management ports (22/23) found. Exiting.")
+        sys.exit(1)
+        
+    print(f"\n[✓] Discovered first active host: {first_host['ip']} (Open ports: {first_host['ports']})")
             
     # Prompt for credentials
-    print("\n--- Phase 2: Credentials Input ---")
-    username = input("Enter SSH/Telnet username: ").strip()
-    password = getpass.getpass("Enter password: ")
-    secret = getpass.getpass("Enter enable secret (press Enter if none): ")
+    username = ""
+    password = ""
+    secret = ""
     
-    print("\n--- Phase 3: Switch Discovery Crawl ---")
+    while True:
+        print(f"\n--- Phase 2: Credentials Input (Validating on first host: {first_host['ip']}) ---")
+        username = input("Enter SSH/Telnet username: ").strip()
+        password = getpass.getpass("Enter password: ")
+        secret = getpass.getpass("Enter enable secret (press Enter if none): ")
+        
+        print(f"[*] Validating credentials on {first_host['ip']}...")
+        if validate_credentials(first_host["ip"], first_host["ports"], username, password, secret):
+            print("[✓] Credentials verified successfully!")
+            break
+        else:
+            print("[!] Credentials validation failed. Please try again.")
+    
+    print("\n--- Phase 3: Switch Discovery Crawl (Concurrent Scan & Crawl) ---")
     scanned_devices = {}
     failed_devices = []
+    devices_lock = threading.Lock()
+    crawl_queue = queue.Queue()
     
+    def crawler_worker():
+        while True:
+            item = crawl_queue.get()
+            if item is None:
+                crawl_queue.task_done()
+                break
+                
+            ip = item["ip"]
+            try:
+                res = crawl_device(ip, item["ports"], username, password, secret)
+                with devices_lock:
+                    if res["status"] == "success":
+                        scanned_devices[ip] = res
+                    elif res["status"] == "partial":
+                        scanned_devices[ip] = res
+                        failed_devices.append({"ip": ip, "reason": res["reason"], "status": "partial"})
+                    else:
+                        failed_devices.append({"ip": ip, "reason": res["reason"], "status": "failed"})
+            except Exception as e:
+                print(f"[{ip}] Unexpected error in crawler worker: {e}")
+                with devices_lock:
+                    failed_devices.append({"ip": ip, "reason": str(e), "status": "failed"})
+            finally:
+                crawl_queue.task_done()
+
     # Thread pool for concurrency
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = {
-            executor.submit(
-                crawl_device, 
-                t["ip"], 
-                t["ports"], 
-                username, 
-                password, 
-                secret
-            ): t for t in targets
-        }
+    num_workers = 10
+    workers = []
+    for _ in range(num_workers):
+        t = threading.Thread(target=crawler_worker)
+        t.daemon = True
+        t.start()
+        workers.append(t)
         
-        for future in as_completed(futures):
-            res = future.result()
-            ip = res["ip"]
-            if res["status"] == "success":
-                scanned_devices[ip] = res
-            elif res["status"] == "partial":
-                scanned_devices[ip] = res
-                failed_devices.append({"ip": ip, "reason": res["reason"], "status": "partial"})
-            else:
-                failed_devices.append({"ip": ip, "reason": res["reason"], "status": "failed"})
+    # Queue the first host immediately
+    crawl_queue.put(first_host)
+    
+    # Feed remaining hosts to queue as they are discovered
+    try:
+        for host in iterator:
+            crawl_queue.put(host)
+    except Exception as e:
+        print(f"[!] Error during discovery: {e}")
+        
+    # Wait for all crawling to complete
+    crawl_queue.join()
+    
+    # Stop workers
+    for _ in range(num_workers):
+        crawl_queue.put(None)
+    for t in workers:
+        t.join()
                 
     # Update MAC address vendors using OUI lookup
     for ip, dev in scanned_devices.items():
