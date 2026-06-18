@@ -387,6 +387,8 @@ def main():
     parser_arg = argparse.ArgumentParser(description="Cisco Switch Discovery & Documentation Engine")
     parser_arg.add_argument("--subnets", help="Comma-separated target subnets (e.g. 192.168.1.0/24)")
     parser_arg.add_argument("--retry", help="Retry failed scan IPs using a JSON failure log file")
+    parser_arg.add_argument("--baseline", help="Save the scanned network state as a baseline JSON file")
+    parser_arg.add_argument("--compare", help="Compare current network state against a baseline JSON file")
     args = parser_arg.parse_args()
     
     # Download OUI registry if not found
@@ -498,6 +500,14 @@ def main():
         report_generator.generate_l3_diagram(scanned_devices)
         report_generator.generate_network_analysis_report(scanned_devices)
         report_generator.generate_best_practices_report(scanned_devices)
+        report_generator.generate_cabling_matrix(scanned_devices)
+        report_generator.generate_protocol_translation(scanned_devices)
+        report_generator.generate_config_variables(scanned_devices)
+        
+        if args.baseline:
+            report_generator.save_baseline_state(scanned_devices, args.baseline)
+        if args.compare:
+            report_generator.compare_baseline_state(scanned_devices, args.compare)
     else:
         print("No devices were successfully scanned. Skipping reports generation.")
         

@@ -818,3 +818,420 @@ def generate_best_practices_report(devices, output_path="Cisco Best Practices.md
         print(f"Best practices report successfully written to {output_path}")
     except Exception as e:
         print(f"Error generating best practices report: {e}")
+
+def generate_cabling_matrix(devices, output_path="migration_cabling_matrix.csv"):
+    """
+    Generates the Physical & Cabling Patching Matrix (Cutover Sheet).
+    """
+    fields = [
+        "Source Hostname",
+        "Source Port",
+        "Description",
+        "Status",
+        "VLAN",
+        "Speed",
+        "Duplex",
+        "Neighbor Hostname",
+        "Neighbor Port",
+        "Neighbor Platform",
+        "Target Hostname (Placeholder)",
+        "Target Port (Placeholder)",
+        "Target Patch Panel (Placeholder)"
+    ]
+    
+    try:
+        with open(output_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fields)
+            writer.writeheader()
+            
+            for ip, dev in devices.items():
+                hostname = dev.get("hostname") or ip
+                ints_detail = dev.get("interfaces_detail", {})
+                neighbors = dev.get("neighbors", [])
+                
+                # Pre-map neighbors by local interface name (normalized)
+                neighbor_map = {}
+                for n in neighbors:
+                    lp = n.get("local_port", "")
+                    if lp:
+                        neighbor_map[normalize_interface_name(lp)] = n
+                        
+                for name, stats in ints_detail.items():
+                    desc = stats.get("description", "")
+                    status = stats.get("status", "down")
+                    vlan = stats.get("vlan", "")
+                    speed = stats.get("speed", "")
+                    duplex = stats.get("duplex", "")
+                    
+                    # Look up neighbor
+                    norm_name = normalize_interface_name(name)
+                    neighbor = neighbor_map.get(norm_name)
+                    
+                    neigh_host = ""
+                    neigh_port = ""
+                    neigh_plat = ""
+                    if neighbor:
+                        neigh_host = neighbor.get("remote_device", "")
+                        neigh_port = neighbor.get("remote_port", "")
+                        neigh_plat = neighbor.get("platform", "")
+                        
+                    writer.writerow({
+                        "Source Hostname": hostname,
+                        "Source Port": name,
+                        "Description": desc,
+                        "Status": status,
+                        "VLAN": vlan,
+                        "Speed": speed,
+                        "Duplex": duplex,
+                        "Neighbor Hostname": neigh_host,
+                        "Neighbor Port": neigh_port,
+                        "Neighbor Platform": neigh_plat,
+                        "Target Hostname (Placeholder)": "",
+                        "Target Port (Placeholder)": "",
+                        "Target Patch Panel (Placeholder)": ""
+                    })
+        print(f"Cabling patching matrix successfully written to {output_path}")
+    except Exception as e:
+        print(f"Error generating cabling matrix CSV: {e}")
+
+def generate_protocol_translation(devices, output_path="cisco_to_target_translation.md"):
+    """
+    Generates Cisco-to-Target Feature Mapping & Protocol Translation Matrix.
+    """
+    lines = [
+        "# Cisco-to-Target Protocol Translation & Mapping Matrix",
+        "",
+        "This report outlines proprietary or Cisco-specific protocols detected on your network switches, and provides the standard target equivalent features required during migration.",
+        ""
+    ]
+    
+    for ip, dev in devices.items():
+        hostname = dev.get("hostname") or ip
+        cfg = dev.get("raw_config", "")
+        
+        lines.append(f"## Switch: {hostname} ({ip})")
+        lines.append("| Cisco Configured Feature | Target Standard Equivalent | Migration Recommendation / Notes |")
+        lines.append("| --- | --- | --- |")
+        
+        features_found = 0
+        
+        if cfg:
+            # Spanning tree
+            if re.search(r'spanning-tree mode\s+(?:pvst|rapid-pvst)', cfg, re.IGNORECASE):
+                lines.append("| **Rapid-PVST+ / PVST+** | `MSTP (802.1s)` or `RSTP (802.1w)` | Proprietary multi-instance STP. Map to standard MSTP or single-instance RSTP. |")
+                features_found += 1
+            # HSRP
+            if re.search(r'standby\s+\d+\s+ip', cfg, re.IGNORECASE):
+                lines.append("| **HSRP (Hot Standby Router Protocol)** | `VRRP (RFC 5798 / 802.11R)` | Proprietary router redundancy. Transition gateway IP virtual addresses to VRRP groups. |")
+                features_found += 1
+            # CDP
+            if re.search(r'cdp run|cdp enable', cfg, re.IGNORECASE):
+                lines.append("| **CDP (Cisco Discovery Protocol)** | `LLDP (802.1AB)` | Proprietary device discovery. Enable LLDP globally and per interface on new vendor switches. |")
+                features_found += 1
+            # VTP
+            if re.search(r'vtp mode|vtp domain', cfg, re.IGNORECASE):
+                lines.append("| **VTP (VLAN Trunking Protocol)** | `Manual Config` or `MVRP (802.1ak)` | Proprietary VLAN propagation. Recommend manual provisioning or automation templates instead. |")
+                features_found += 1
+            # Static EtherChannel
+            if re.search(r'channel-group\s+\d+\s+mode\s+on', cfg, re.IGNORECASE):
+                lines.append("| **Static EtherChannel** | `LACP (802.3ad) Active` | Hardcoded bundling without control packet validation. Convert to standard dynamic LACP. |")
+                features_found += 1
+            # Stackwise
+            if dev.get("model") and ("c9300" in dev.get("model").lower() or "c3850" in dev.get("model").lower()):
+                lines.append("| **StackWise / StackWise-Virtual** | `VPC / MLAG` or Target Virtual Chassis | Stack backplane redundancy. Transition to target Multi-chassis LAG or equivalent backplane stack. |")
+                features_found += 1
+                
+        if features_found == 0:
+            lines.append("| *No proprietary Cisco protocols detected.* | Standard-ready configuration | Config is already standard-compliant. |")
+            
+        lines.append("")
+        
+    try:
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+        print(f"Protocol translation report successfully written to {output_path}")
+    except Exception as e:
+        print(f"Error generating protocol translation report: {e}")
+
+def generate_config_variables(devices, output_path="migration_config_variables.json"):
+    """
+    Generates configuration variables JSON sheet for Jinja2/Ansible templates.
+    """
+    variables = {}
+    
+    # Pre-parse VLAN names for all devices
+    device_vlan_maps = {}
+    for ip, dev in devices.items():
+        hostname = dev.get("hostname") or ip
+        cfg = dev.get("raw_config", "")
+        vlan_names = {}
+        if cfg:
+            matches = re.finditer(r'^vlan\s+(\d+)\s*[\r\n]+(?:\s+name\s+(\S+))?', cfg, re.MULTILINE | re.IGNORECASE)
+            for match in matches:
+                vlan_id = match.group(1)
+                name = match.group(2)
+                if name:
+                    vlan_names[vlan_id] = name.strip()
+        device_vlan_maps[hostname] = vlan_names
+
+    for ip, dev in devices.items():
+        hostname = dev.get("hostname") or ip
+        services = dev.get("services", {})
+        
+        # Build VLAN list
+        vlans_list = []
+        vlan_names = device_vlan_maps.get(hostname, {})
+        for vid, vname in vlan_names.items():
+            vlans_list.append({"id": vid, "name": vname})
+            
+        # Build SVI list
+        l3_ints = dev.get("l3_interfaces", [])
+        ints_detail = dev.get("interfaces_detail", {})
+        svis_list = []
+        for intf in l3_ints:
+            intf_name = intf.get("interface")
+            ip_addr = intf.get("ip_address")
+            status = intf.get("status")
+            
+            desc = ""
+            norm_name = normalize_interface_name(intf_name)
+            for name, stats in ints_detail.items():
+                if normalize_interface_name(name) == norm_name:
+                    desc = stats.get("description", "")
+                    break
+                    
+            subnet_range = '.'.join(ip_addr.split('.')[:3]) + '.0/24' if (ip_addr and '.' in ip_addr) else 'N/A'
+            svis_list.append({
+                "interface": intf_name,
+                "ip_address": ip_addr,
+                "subnet": subnet_range,
+                "status": status,
+                "description": desc
+            })
+            
+        # Build physical interfaces list
+        interfaces_list = []
+        for name, stats in ints_detail.items():
+            # Skip SVIs in the physical list
+            if "vlan" in name.lower() or "loopback" in name.lower():
+                continue
+            interfaces_list.append({
+                "interface": name,
+                "description": stats.get("description", ""),
+                "status": stats.get("status", "down"),
+                "vlan": stats.get("vlan", ""),
+                "speed": stats.get("speed", ""),
+                "duplex": stats.get("duplex", "")
+            })
+            
+        variables[hostname] = {
+            "management_ip": ip,
+            "model": dev.get("model", "Unknown"),
+            "firmware": dev.get("firmware", "Unknown"),
+            "serial": dev.get("serial", "Unknown"),
+            "dns_servers": services.get("dns_servers", []),
+            "ntp_servers": services.get("ntp_servers", []),
+            "radius_servers": services.get("radius_servers", []),
+            "tacacs_servers": services.get("tacacs_servers", []),
+            "vlans": vlans_list,
+            "l3_interfaces": svis_list,
+            "interfaces": interfaces_list
+        }
+        
+    try:
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(variables, f, indent=4)
+        print(f"Configuration variables successfully written to {output_path}")
+    except Exception as e:
+        print(f"Error generating config variables JSON: {e}")
+
+def save_baseline_state(devices, output_path):
+    """
+    Saves the key operational state parameters (MACs, routes, neighbors, up interfaces)
+    as a baseline JSON file for future comparison.
+    """
+    baseline = {}
+    for ip, dev in devices.items():
+        hostname = dev.get("hostname") or ip
+        
+        # Up physical interfaces
+        up_ints = []
+        for name, stats in dev.get("interfaces_detail", {}).items():
+            if stats.get("status") == "up":
+                up_ints.append(name)
+                
+        # Neighbor connections
+        neighbors = []
+        for n in dev.get("neighbors", []):
+            neighbors.append({
+                "local_port": n.get("local_port", ""),
+                "remote_device": n.get("remote_device", ""),
+                "remote_port": n.get("remote_port", "")
+            })
+            
+        # Route prefixes
+        routes = [r.get("prefix") for r in dev.get("routes", []) if r.get("prefix")]
+        
+        # SVI / L3 Interface states
+        svis = {}
+        for intf in dev.get("l3_interfaces", []):
+            svis[intf.get("interface")] = {
+                "ip": intf.get("ip_address"),
+                "status": intf.get("status")
+            }
+            
+        baseline[hostname] = {
+            "management_ip": ip,
+            "up_interfaces": up_ints,
+            "neighbors": neighbors,
+            "routes": routes,
+            "svis": svis
+        }
+        
+    try:
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(baseline, f, indent=4)
+        print(f"\n[+] Baseline state successfully saved to {output_path}")
+    except Exception as e:
+        print(f"Error saving baseline state: {e}")
+
+def compare_baseline_state(devices, baseline_path, output_path="migration_verification_report.md"):
+    """
+    Compares the current network state against a baseline JSON file.
+    Generates a verification report detailing missing elements or state mismatches.
+    """
+    if not os.path.exists(baseline_path):
+        print(f"Error: Baseline file {baseline_path} does not exist.")
+        return
+        
+    try:
+        with open(baseline_path, "r") as f:
+            baseline = json.load(f)
+    except Exception as e:
+        print(f"Error reading baseline file: {e}")
+        return
+        
+    lines = [
+        "# Post-Migration Verification & Validation Report",
+        "",
+        f"This report compares the current network state against the baseline file: `{os.path.basename(baseline_path)}`.",
+        ""
+    ]
+    
+    total_failures = 0
+    
+    for host_base, base_state in baseline.items():
+        # Find matching device in current devices by IP or hostname
+        current_dev = None
+        base_ip = base_state.get("management_ip")
+        
+        for ip, dev in devices.items():
+            if ip == base_ip or (dev.get("hostname") and dev.get("hostname").lower() == host_base.lower()):
+                current_dev = dev
+                break
+                
+        lines.append(f"## Device: {host_base}")
+        if not current_dev:
+            lines.append("❌ **CRITICAL: Switch is UNREACHABLE or missing in current scan!**")
+            lines.append("")
+            total_failures += 1
+            continue
+            
+        device_failures = 0
+        
+        # 1. Compare UP physical interfaces
+        base_up = base_state.get("up_interfaces", [])
+        curr_ints = current_dev.get("interfaces_detail", {})
+        curr_up = [name for name, stats in curr_ints.items() if stats.get("status") == "up"]
+        
+        missing_ints = [name for name in base_up if name not in curr_up]
+        if missing_ints:
+            lines.append(f"❌ **Interface Status Mismatch**: {len(missing_ints)} interfaces that were UP are now DOWN or missing:")
+            for name in missing_ints:
+                desc = curr_ints.get(name, {}).get("description", "No Description")
+                lines.append(f"  * `{name}` (Description: `{desc}`)")
+            device_failures += 1
+        else:
+            lines.append("✓ **Interface Status**: All baseline UP interfaces are currently UP.")
+            
+        # 2. Compare SVI / L3 Interface states
+        base_svis = base_state.get("svis", {})
+        curr_svis = {intf.get("interface"): intf for intf in current_dev.get("l3_interfaces", [])}
+        
+        svi_mismatches = []
+        for name, base_svi in base_svis.items():
+            curr_svi = curr_svis.get(name)
+            if not curr_svi:
+                svi_mismatches.append(f"Interface `{name}` is missing entirely.")
+            elif curr_svi.get("status") != base_svi.get("status"):
+                svi_mismatches.append(f"Interface `{name}` status is `{curr_svi.get('status')}` (Expected: `{base_svi.get('status')}`).")
+            elif curr_svi.get("ip_address") != base_svi.get("ip"):
+                svi_mismatches.append(f"Interface `{name}` IP is `{curr_svi.get('ip_address')}` (Expected: `{base_svi.get('ip')}`).")
+                
+        if svi_mismatches:
+            lines.append(f"❌ **SVI/L3 Mismatches**:")
+            for mismatch in svi_mismatches:
+                lines.append(f"  * {mismatch}")
+            device_failures += 1
+        else:
+            lines.append("✓ **SVI/L3 Interfaces**: All baseline L3 interfaces and IPs match.")
+            
+        # 3. Compare Neighbors (CDP/LLDP)
+        base_neighbors = base_state.get("neighbors", [])
+        curr_neighbors = current_dev.get("neighbors", [])
+        
+        missing_neighbors = []
+        for bn in base_neighbors:
+            match_found = False
+            b_remote = bn.get("remote_device", "").split('.')[0].lower()
+            b_local_port = normalize_interface_name(bn.get("local_port", ""))
+            
+            for cn in curr_neighbors:
+                c_remote = cn.get("remote_device", "").split('.')[0].lower()
+                c_local_port = normalize_interface_name(cn.get("local_port", ""))
+                if b_remote == c_remote and b_local_port == c_local_port:
+                    match_found = True
+                    break
+            if not match_found:
+                missing_neighbors.append(f"Port `{bn.get('local_port')}` has lost connection to `{bn.get('remote_device')}` (Port: `{bn.get('remote_port')}`).")
+                
+        if missing_neighbors:
+            lines.append(f"❌ **Neighbor/Uplink Mismatches**: Lost neighbor adjacencies on {len(missing_neighbors)} ports:")
+            for mismatch in missing_neighbors:
+                lines.append(f"  * {mismatch}")
+            device_failures += 1
+        else:
+            lines.append("✓ **CDP/LLDP Neighbor Adjacencies**: All baseline neighbors are present.")
+            
+        # 4. Compare Routing table prefixes
+        base_routes = set(base_state.get("routes", []))
+        curr_routes = set([r.get("prefix") for r in current_dev.get("routes", []) if r.get("prefix")])
+        
+        missing_routes = base_routes - curr_routes
+        if missing_routes:
+            lines.append(f"❌ **Routing Prefix Mismatches**: {len(missing_routes)} routes present in the baseline are missing:")
+            for r in sorted(list(missing_routes)):
+                lines.append(f"  * Prefix: `{r}`")
+            device_failures += 1
+        else:
+            lines.append("✓ **Routing Table**: All baseline route prefixes are learned.")
+            
+        if device_failures > 0:
+            lines.append(f"\n⚠️ **Verification Summary**: {device_failures} state verification checks failed for switch **{host_base}**.")
+            total_failures += 1
+        else:
+            lines.append(f"\n✓ **Verification Summary**: Switch **{host_base}** passed all state verification checks.")
+        lines.append("")
+        
+    lines.append("---")
+    if total_failures > 0:
+        lines.append(f"# ❌ Verification Verdict: FAILED ({total_failures} switches failed validation checks)")
+    else:
+        lines.append("# ✓ Verification Verdict: PASSED (All switches match their baseline states)")
+        
+    try:
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+        print(f"\n[+] Post-Migration Verification Report successfully written to {output_path}")
+    except Exception as e:
+        print(f"Error generating verification report: {e}")

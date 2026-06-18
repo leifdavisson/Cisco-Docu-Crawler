@@ -13,6 +13,11 @@ L2_network_diagrams.md
 L3_network_diagrams.md
 network_analysis_report.md
 Cisco Best Practices.md
+migration_cabling_matrix.csv
+cisco_to_target_translation.md
+migration_config_variables.json
+migration_verification_report.md
+*.json
 oui.txt
 
 # OS specific files
