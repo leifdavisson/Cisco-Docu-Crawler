@@ -66,20 +66,25 @@ def run_nmap_scan(subnets):
     Falls back to TCP Connect scan if not root.
     """
     targets = " ".join(subnets)
-    xml_output = "nmap_results.xml"
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    xml_output = os.path.join(RAW_LOGS_DIR, f"nmap_results_{timestamp}.xml")
     
     # Try SYN stealth scan first, fallback to TCP connect scan if non-root
-    print(f"Running Nmap scan on target subnets: {targets}")
+    print(f"\nRunning Nmap scan on target subnets: {targets}")
+    print(f"[*] Saving XML output to: {xml_output}")
     cmd = ["nmap", "-sS", "-p", "22,23", "-Pn", "-oX", xml_output] + subnets
     
     try:
+        print("[*] Starting Nmap SYN scan... (this may take a few minutes)")
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if "You must be root" in result.stderr or result.returncode != 0:
-            print("Non-root environment detected. Falling back to Nmap TCP Connect scan (-sT)...")
+            print("[*] Non-root environment/permissions detected. Falling back to Nmap TCP Connect scan (-sT)...")
             cmd = ["nmap", "-sT", "-p", "22,23", "-Pn", "-oX", xml_output] + subnets
+            print("[*] Starting Nmap TCP Connect scan... (this may take a few minutes)")
             subprocess.run(cmd, check=True)
+        print("[✓] Nmap scan completed successfully.")
     except subprocess.CalledProcessError as e:
-        print(f"Nmap scan failed: {e}")
+        print(f"[!] Nmap scan failed: {e}")
         return []
 
     return parse_nmap_xml(xml_output)
