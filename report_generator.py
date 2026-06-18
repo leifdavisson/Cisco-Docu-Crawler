@@ -384,15 +384,29 @@ def generate_l3_diagram(devices, output_path="L3_network_diagrams.md"):
         "",
         "## Authoritative VLAN, Subnet & SVI Map",
         "",
-        "| Switch Hostname | Interface / VLAN | SVI IP Address | Subnet Range | Interface Status |",
-        "| --- | --- | --- | --- | --- |"
+        "| Switch Hostname | Interface / VLAN | Description | SVI IP Address | Subnet Range | Interface Status |",
+        "| --- | --- | --- | --- | --- | --- |"
     ]
     
     for ip, dev in devices.items():
         hostname = dev.get("hostname") or ip
         l3_ints = dev.get("l3_interfaces", [])
+        ints_detail = dev.get("interfaces_detail", {})
         for intf in l3_ints:
-            lines.append(f"| {hostname} | {intf.get('interface')} | {intf.get('ip_address')} | {'.'.join(intf.get('ip_address').split('.')[:3]) + '.0/24' if '.' in intf.get('ip_address') else 'N/A'} | {intf.get('status')} |")
+            intf_name = intf.get("interface")
+            ip_addr = intf.get("ip_address")
+            status = intf.get("status")
+            
+            # Match SVI name to interfaces_detail to get description
+            desc = ""
+            norm_name = normalize_interface_name(intf_name)
+            for name, stats in ints_detail.items():
+                if normalize_interface_name(name) == norm_name:
+                    desc = stats.get("description", "")
+                    break
+                    
+            subnet_range = '.'.join(ip_addr.split('.')[:3]) + '.0/24' if (ip_addr and '.' in ip_addr) else 'N/A'
+            lines.append(f"| {hostname} | {intf_name} | {desc or 'N/A'} | {ip_addr} | {subnet_range} | {status} |")
             
     lines.extend([
         "",
@@ -464,7 +478,8 @@ def generate_network_analysis_report(devices, output_path="network_analysis_repo
                 
             # Errors
             if in_err > 0 or crc > 0 or out_err > 0:
-                errors_found.append(f"* **{hostname}** Interface `{name}`: Input Errors: `{in_err}`, CRCs: `{crc}`, Output Errors: `{out_err}`.")
+                desc_str = f" (`{desc}`)" if desc else ""
+                errors_found.append(f"* **{hostname}** Interface `{name}`{desc_str}: Input Errors: `{in_err}`, CRCs: `{crc}`, Output Errors: `{out_err}`.")
                 
     if mismatches:
         lines.extend(mismatches)
@@ -516,6 +531,34 @@ def generate_network_analysis_report(devices, output_path="network_analysis_repo
             
     if stp_issues:
         lines.extend(stp_issues)
+        
+    # D. Interface Descriptions & Port Naming
+    lines.append("\n### Configured Interface Descriptions & Port Naming")
+    desc_found = False
+    for ip, dev in devices.items():
+        hostname = dev.get("hostname") or ip
+        ints_detail = dev.get("interfaces_detail", {})
+        
+        has_local_desc = False
+        device_lines = []
+        for name, stats in ints_detail.items():
+            desc = stats.get("description", "")
+            if desc:
+                if not has_local_desc:
+                    device_lines.append(f"\n#### {hostname} Port Naming Mappings:")
+                    device_lines.append("| Port Interface | Speed | Status | Configured Description / Name |")
+                    device_lines.append("| --- | --- | --- | --- |")
+                    has_local_desc = True
+                    desc_found = True
+                status = stats.get("status", "unknown")
+                speed = stats.get("speed", "unknown")
+                device_lines.append(f"| `{name}` | {speed} | {status} | {desc} |")
+                
+        if has_local_desc:
+            lines.extend(device_lines)
+            
+    if not desc_found:
+        lines.append("  * No interface descriptions or port names were found configured on scanned devices.")
         
     # 2. Layer 3 (Routing) Analysis
     lines.extend([
