@@ -497,6 +497,7 @@ def main():
         report_generator.generate_l2_diagram(scanned_devices)
         report_generator.generate_l3_diagram(scanned_devices)
         report_generator.generate_network_analysis_report(scanned_devices)
+        report_generator.generate_best_practices_report(scanned_devices)
     else:
         print("No devices were successfully scanned. Skipping reports generation.")
         

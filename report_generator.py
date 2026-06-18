@@ -705,3 +705,116 @@ def generate_network_analysis_report(devices, output_path="network_analysis_repo
         print(f"Network analysis report successfully written to {output_path}")
     except Exception as e:
         print(f"Error generating network analysis report: {e}")
+
+def generate_best_practices_report(devices, output_path="Cisco Best Practices.md"):
+    """
+    Generates a Cisco Security and Compatibility Best Practices checklist report.
+    Checks running configurations and state parameters against Cisco best practices
+    and flags service-impacting remediations.
+    """
+    lines = [
+        "# Cisco Switch Best Practices & Security Audit Report",
+        "",
+        "This report compares active switch configurations against Cisco Security Hardening and Compatibility Guidelines.",
+        "",
+        "### ⚠️ Critical Warning on Service Impact Levels",
+        "* **Low Impact**: Configuration changes that do not affect active data traffic (e.g. disabling unused protocols).",
+        "* **Medium Impact**: Admin session drops or localized traffic shifts (e.g. switching from Telnet to SSH, changing AAA).",
+        "* **High / Service Disruptive**: Potential network-wide downtime, routing adjacency drops, or port closures (e.g. Port Security, Spanning Tree changes, LACP mode updates).",
+        ""
+    ]
+
+    for ip, dev in devices.items():
+        hostname = dev.get("hostname") or ip
+        cfg = dev.get("raw_config", "")
+        mgmt_method = dev.get("mgmt_method", "SSH")
+        services = dev.get("services", {})
+        
+        # Audits
+        # 1. SSH vs Telnet
+        ssh_ok = (mgmt_method == "SSH")
+        
+        # 2. Central AAA
+        aaa_ok = bool(services.get("radius_servers") or services.get("tacacs_servers"))
+        
+        # 3. SNMP v3
+        snmp_v3 = False
+        snmp_v1_2 = False
+        if cfg:
+            if re.search(r'snmp-server group|snmp-server user', cfg, re.IGNORECASE):
+                snmp_v3 = True
+            if re.search(r'snmp-server community', cfg, re.IGNORECASE):
+                snmp_v1_2 = True
+        snmp_ok = snmp_v3 and not snmp_v1_2
+        
+        # 4. DHCP Snooping
+        dhcp_snoop = False
+        if cfg and re.search(r'ip dhcp snooping(?!\s+information)', cfg, re.IGNORECASE):
+            dhcp_snoop = True
+            
+        # 5. BPDU Guard
+        bpdu_guard = False
+        if cfg and re.search(r'bpduguard enable|bpduguard default', cfg, re.IGNORECASE):
+            bpdu_guard = True
+            
+        # 6. Port Security
+        port_sec = False
+        if cfg and re.search(r'port-security', cfg, re.IGNORECASE):
+            port_sec = True
+            
+        # 7. Static LACP ("mode on") loops
+        lacp_static = False
+        if cfg and re.search(r'channel-group\s+\d+\s+mode\s+on', cfg, re.IGNORECASE):
+            lacp_static = True
+            
+        # 8. Control Plane Policing (CoPP)
+        copp_ok = False
+        if cfg and re.search(r'control-plane', cfg, re.IGNORECASE):
+            copp_ok = True
+
+        lines.extend([
+            f"## Device: {hostname} ({ip})",
+            "",
+            "| Best Practice Rule | Current Status | Cisco Recommendation | Service Impact of Fix |",
+            "| --- | --- | --- | --- |",
+            f"| **Secure Management (SSH)** | {'[✓] Compliant' if ssh_ok else '[✗] Non-Compliant'} | Disable Telnet, use SSHv2 only | **Medium**: Will drop current active Telnet sessions. |",
+            f"| **Centralized AAA** | {'[✓] Compliant' if aaa_ok else '[✗] Non-Compliant'} | Use RADIUS/TACACS+ instead of local users | **Medium**: Potential admin lockout if AAA servers are unreachable. |",
+            f"| **Secure SNMP (v3)** | {'[✓] Compliant' if snmp_ok else '[✗] Non-Compliant'} | Disable SNMP v1/v2c, use encrypted SNMPv3 | **Low**: Requires NMS credential updates. |",
+            f"| **DHCP Snooping** | {'[✓] Compliant' if dhcp_snoop else '[✗] Non-Compliant'} | Enable globally and trust uplinks to block rogue servers | **High**: Incorrect trust port configuration blocks valid DHCP leases. |",
+            f"| **STP BPDU Guard** | {'[✓] Compliant' if bpdu_guard else '[✗] Non-Compliant'} | Enable on access-ports to shut down rogue switches | **High**: Shuts down ports if rogue STP packets are received. |",
+            f"| **Port Security** | {'[✓] Compliant' if port_sec else '[✗] Non-Compliant'} | Limit MACs per access-port to block MAC flooding | **High**: Shuts down port if users connect unapproved hubs/switches. |",
+            f"| **Static EtherChannel** | {'[✓] Compliant' if not lacp_static else '[✗] Non-Compliant'} | Avoid static 'mode on'; use dynamic LACP | **Service Disruptive**: Changing mode drops bundle interfaces; incorrect configuration creates loops. |",
+            f"| **Control Plane Policing (CoPP)** | {'[✓] Compliant' if copp_ok else '[✗] Non-Compliant'} | Enable CoPP to protect CPU from Denial of Service | **Medium**: Can drop valid protocol packets if rate-limits are too strict. |",
+            ""
+        ])
+
+    lines.extend([
+        "## Detailed Remediation Guide & Risk Mitigations",
+        "",
+        "### 1. Static EtherChannel to LACP Active Mode",
+        "* **Risk**: **Service Disruptive**",
+        "* **Impact**: Changing a port-channel group configuration tears down the virtual interface. If traffic is flowing over the port-channel, a temporary outage occurs.",
+        "* **Mitigation**: Perform during a maintenance window. Enable LACP on the remote end first (passive or active), then switch the local Cisco switch to `mode active`. Avoid using `mode on` (static) as it cannot detect cabling loops.",
+        "",
+        "### 2. DHCP Snooping & Dynamic ARP Inspection (DAI)",
+        "* **Risk**: **High**",
+        "* **Impact**: If you enable DHCP Snooping without marking the uplink ports to the DHCP server as `trusted`, the switch will discard all incoming DHCP Server packets, entirely blocking DHCP addressing.",
+        "* **Mitigation**: Always configure interface trust states first: `ip dhcp snooping trust` on uplink interfaces BEFORE enabling DHCP snooping globally.",
+        "",
+        "### 3. Port Security & MAC Address Limits",
+        "* **Risk**: **High**",
+        "* **Impact**: If a user plugs in a small unmanaged desktop switch or a device changes its MAC address, the port is put into `err-disabled` (shut down), causing local user outages.",
+        "* **Mitigation**: Set a reasonable MAC count limit (e.g. `switchport port-security maximum 3`) and configure violation mode to `restrict` instead of `shutdown` to alert syslog without disabling the interface.",
+        "",
+        "### 4. AAA Authentication (RADIUS/TACACS+)",
+        "* **Risk**: **Medium**",
+        "* **Impact**: If centralized servers are unreachable and no local fallback is configured, administrators will be completely locked out of the switch console.",
+        "* **Mitigation**: Always ensure a local fallback is defined in the method list: `aaa authentication login default group tacacs+ local` and verify console fallback access before logging out."
+    ])
+
+    try:
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+        print(f"Best practices report successfully written to {output_path}")
+    except Exception as e:
+        print(f"Error generating best practices report: {e}")
