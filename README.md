@@ -53,6 +53,34 @@ After a successful scan, the crawler compiles and generates the following report
 
 ---
 
+## 🖥️ How to View the Generated Reports (.md & Mermaid Diagrams)
+
+The generated reports are written in **Markdown (`.md`)** format, which is a clean, readable text format. The physical and logical network diagrams are created using **Mermaid.js**, a text-to-diagram standard.
+
+To view the reports with rich formatting and render the diagrams automatically, we recommend using one of the following tools:
+
+### 1. Obsidian (Recommended & Easiest)
+[Obsidian](https://obsidian.md/) is a free, highly-rated note-taking app available for Windows, macOS, and Linux.
+* **Why it's best:** It natively supports Markdown and renders Mermaid diagrams instantly out-of-the-box without needing any plugins or setup.
+* **How to use:** Install Obsidian, click "Open folder as vault", and select the folder where the crawler generated your reports.
+
+### 2. GitHub (Zero Installation)
+If you push these files to a GitHub repository:
+* **Why it's best:** GitHub natively parses Markdown and renders Mermaid diagrams directly inside the web browser.
+* **How to use:** Simply click on any `.md` file on your GitHub project page to read it.
+
+### 3. Visual Studio Code (VS Code)
+For developers and IT administrators already using VS Code:
+* **How to use:** Open any `.md` file and open the preview tab (`Ctrl+Shift+V` on Windows/Linux or `Cmd+Shift+V` on macOS).
+* **Render Diagrams:** Install the **Markdown Preview Mermaid Support** extension from the Marketplace to render the topologies inside the preview pane.
+
+### 4. Mermaid Live Editor (Web-based)
+If you just want to export the diagrams:
+* **How to use:** Copy the text block starting with ````mermaid` from your diagram reports and paste it into the [Mermaid Live Editor](https://mermaid.live/). From there, you can customize the layout or export it as a high-resolution PNG, SVG, or PDF.
+
+---
+
+
 ## 🚀 Getting Started
 
 ### Quick Start (Recommended)
