@@ -63,11 +63,14 @@ def check_nmap_installed():
     except FileNotFoundError:
         return False
 
-def validate_credentials(ip, ports, username, password, secret):
+def validate_credentials(ip, ports, username, password, secret, simulate=False):
     """
     Validates credentials by attempting to connect to a single host.
     Returns True if connection succeeds, False otherwise.
     """
+    if simulate:
+        print(f"[*] Simulated credential verification succeeded for host {ip}.")
+        return True
     if 22 in ports:
         try:
             conn, _ = connect_and_detect(ip, username, password, secret, conn_type="ssh")
@@ -157,7 +160,7 @@ def run_nmap_scan(subnets):
                 
         process.stdout.close()
         process.wait()
-        print("[✓] Nmap scan completed successfully.")
+        print("[+] Nmap scan completed successfully.")
     except Exception as e:
         print(f"[!] Nmap scan error: {e}")
 
@@ -206,6 +209,134 @@ def run_python_port_scan(subnets):
                 print(f"  Discovered active host: {res['ip']} (Open ports: {res['ports']})")
                 yield res
 
+def run_simulation_scan(subnets):
+    """
+    Simulates discovery of active switch IPs in target subnets.
+    Yields discovered hosts in real-time.
+    """
+    print("[*] Running simulated subnet discovery...")
+    for subnet in subnets:
+        try:
+            net = IPNetwork(subnet)
+            # Pick a few sample IP addresses from the network to "discover"
+            ips = []
+            if len(net) > 50:
+                # E.g. pick indices 10, 20, 30, 100
+                ips = [str(net[10]), str(net[20]), str(net[30]), str(net[100])]
+            elif len(net) > 5:
+                ips = [str(net[i]) for i in range(1, min(5, len(net) - 1))]
+            else:
+                ips = [str(ip) for ip in list(net)]
+                
+            print(f"  Simulating scan of subnet {subnet} ({len(net)} IPs). Yielding {len(ips)} simulated active hosts...")
+            for ip in ips:
+                time.sleep(0.1) # Simulate real-time discovery delay
+                print(f"  Discovered active host (simulated): {ip} (Open ports: [22, 23])")
+                yield {"ip": ip, "mac": f"00:11:22:33:44:{hash(ip) & 0xff:02x}", "ports": [22, 23]}
+        except Exception as e:
+            print(f"Invalid subnet range ignored in simulation: {subnet} ({e})")
+
+def crawl_device_simulated(ip):
+    """
+    Simulates performing switch discovery commands on a switch.
+    Returns simulated switch data and saves mock config files.
+    """
+    print(f"[{ip}] Simulating Switch discovery crawl...")
+    time.sleep(0.5) # Simulate CLI delay
+    
+    # Generate stable mock data using hash of IP
+    h = hash(ip)
+    last_octet = h & 0xff
+    mac = f"00:1a:a1:b2:c3:{last_octet:02x}"
+    
+    # Generate mock neighbor IP addresses
+    ip_parts = ip.split('.')
+    neigh_ip_1 = f"{ip_parts[0]}.{ip_parts[1]}.{ip_parts[2]}.{int(ip_parts[3])+1}"
+    neigh_ip_2 = f"{ip_parts[0]}.{ip_parts[1]}.{ip_parts[2]}.{int(ip_parts[3])+2}"
+    
+    os_choices = ['cisco_ios', 'cisco_nxos', 'cisco_xr']
+    os_type = os_choices[last_octet % len(os_choices)]
+    
+    model_choices = ['WS-C3850-24T', 'N9K-C93180YC-FX', 'ISR4431/K9', 'WS-C2960X-48FPS-L']
+    model = model_choices[last_octet % len(model_choices)]
+    
+    firmware_choices = ['16.12.5b', '9.3(5)', '15.5(3)S', '15.2(2)E6']
+    firmware = firmware_choices[last_octet % len(firmware_choices)]
+    
+    hostname = f"sim-switch-{last_octet}"
+    serial = f"FDO{last_octet:03d}X{last_octet:02d}Y"
+    
+    device_data = {
+        "ip": ip,
+        "status": "success",
+        "mgmt_method": "SSH" if (last_octet % 2 == 0) else "Telnet",
+        "os_type": os_type,
+        "hostname": hostname,
+        "model": model,
+        "serial": serial,
+        "firmware": firmware,
+        "mac_address": mac,
+        "neighbors": [
+            {
+                "local_port": "GigabitEthernet1/0/1",
+                "remote_device": f"sim-switch-{last_octet + 1}",
+                "remote_port": "GigabitEthernet1/0/2",
+                "remote_ip": neigh_ip_1,
+                "remote_platform": "cisco_ios"
+            },
+            {
+                "local_port": "GigabitEthernet1/0/2",
+                "remote_device": f"sim-switch-{last_octet + 2}",
+                "remote_port": "GigabitEthernet1/0/1",
+                "remote_ip": neigh_ip_2,
+                "remote_platform": "cisco_nxos"
+            }
+        ],
+        "l3_interfaces": [
+            {"interface": "Vlan10", "ip_address": ip, "status": "up", "protocol": "up"},
+            {"interface": "Loopback0", "ip_address": f"10.255.255.{last_octet}", "status": "up", "protocol": "up"}
+        ],
+        "interfaces_detail": {
+            "GigabitEthernet1/0/1": {"status": "up", "protocol": "up", "description": "Uplink to Core", "mac_address": mac, "speed": "1Gb/s", "duplex": "Full-duplex"},
+            "GigabitEthernet1/0/2": {"status": "up", "protocol": "up", "description": "Downlink", "mac_address": mac, "speed": "1Gb/s", "duplex": "Full-duplex"}
+        },
+        "stp": {
+            "enabled": True,
+            "vlans": {
+                "10": {
+                    "GigabitEthernet1/0/1": {"role": "Root", "state": "FWD"},
+                    "GigabitEthernet1/0/2": {"role": "Desg", "state": "FWD" if last_octet % 4 != 0 else "BLK"}
+                }
+            }
+        },
+        "routes": [
+            {"protocol": "C", "network": f"{ip_parts[0]}.{ip_parts[1]}.{ip_parts[2]}.0", "mask": "24", "nexthop": "Directly Connected", "interface": "Vlan10"},
+            {"protocol": "O", "network": "0.0.0.0", "mask": "0", "nexthop": f"{ip_parts[0]}.{ip_parts[1]}.{ip_parts[2]}.1", "interface": "Vlan10"}
+        ],
+        "services": {
+            "dns_servers": ["8.8.8.8", "8.8.4.4"],
+            "ntp_servers": ["pool.ntp.org"],
+            "radius_servers": ["192.168.100.50"],
+            "tacacs_servers": ["192.168.100.60"]
+        },
+        "raw_config": f"! Simulated Config\nhostname {hostname}\n!"
+    }
+    
+    # Save simulated running-config to raw logs & backups
+    try:
+        with open(os.path.join(RAW_LOGS_DIR, f"{ip}_running_config.cfg"), "w") as f:
+            f.write(device_data["raw_config"])
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        backup_filename = f"{hostname}_backup_{timestamp}.cfg"
+        with open(os.path.join(BACKUPS_DIR, backup_filename), "w") as f:
+            f.write(device_data["raw_config"])
+        print(f"[{ip}] Saved backup to {BACKUPS_DIR}/{backup_filename}")
+    except Exception as e:
+        print(f"[{ip}] Error saving simulated config: {e}")
+        
+    print(f"[{ip}] Scanned successfully (simulated). Hostname: {hostname}, Model: {model}")
+    return device_data
+
 def connect_and_detect(ip, username, password, secret, conn_type="ssh"):
     """
     Connects to the switch and detects the specific Cisco OS type.
@@ -224,6 +355,12 @@ def connect_and_detect(ip, username, password, secret, conn_type="ssh"):
         'global_delay_factor': 2,
     }
     
+    if conn_type == 'telnet':
+        # Optimize for slower/older Telnet connections and enable logging for troubleshooting
+        device['read_timeout'] = 60
+        device['fast_cli'] = False
+        device['session_log'] = os.path.join(RAW_LOGS_DIR, f"{ip}_telnet_session.log")
+        
     # Establish connection
     net_connect = ConnectHandler(**device)
     
@@ -436,6 +573,7 @@ def main():
     parser_arg.add_argument("--retry", help="Retry failed scan IPs using a JSON failure log file")
     parser_arg.add_argument("--baseline", help="Save the scanned network state as a baseline JSON file")
     parser_arg.add_argument("--compare", help="Compare current network state against a baseline JSON file")
+    parser_arg.add_argument("--simulate", action="store_true", help="Simulate/mock network scan and switch crawling")
     args = parser_arg.parse_args()
     
     # Download OUI registry if not found
@@ -487,7 +625,9 @@ def main():
             sys.exit(1)
             
         print("\n--- Phase 1: Subnet Discovery ---")
-        if check_nmap_installed():
+        if args.simulate:
+            host_generator = run_simulation_scan(valid_subnets)
+        elif check_nmap_installed():
             host_generator = run_nmap_scan(valid_subnets)
         else:
             host_generator = run_python_port_scan(valid_subnets)
@@ -504,7 +644,7 @@ def main():
         print("No switch management ports (22/23) found. Exiting.")
         sys.exit(1)
         
-    print(f"\n[✓] Discovered first active host: {first_host['ip']} (Open ports: {first_host['ports']})")
+    print(f"\n[+] Discovered first active host: {first_host['ip']} (Open ports: {first_host['ports']})")
             
     # Prompt for credentials
     username = ""
@@ -514,12 +654,16 @@ def main():
     while True:
         print(f"\n--- Phase 2: Credentials Input (Validating on first host: {first_host['ip']}) ---")
         username = input("Enter SSH/Telnet username: ").strip()
-        password = getpass.getpass("Enter password: ")
-        secret = getpass.getpass("Enter enable secret (press Enter if none): ")
+        if sys.stdin.isatty():
+            password = getpass.getpass("Enter password: ")
+            secret = getpass.getpass("Enter enable secret (press Enter if none): ")
+        else:
+            password = input("Enter password: ").strip()
+            secret = input("Enter enable secret (press Enter if none): ").strip()
         
         print(f"[*] Validating credentials on {first_host['ip']}...")
-        if validate_credentials(first_host["ip"], first_host["ports"], username, password, secret):
-            print("[✓] Credentials verified successfully!")
+        if validate_credentials(first_host["ip"], first_host["ports"], username, password, secret, simulate=args.simulate):
+            print("[+] Credentials verified successfully!")
             break
         else:
             print("[!] Credentials validation failed. Please try again.")
@@ -539,15 +683,18 @@ def main():
                 
             ip = item["ip"]
             try:
-                res = crawl_device(ip, item["ports"], username, password, secret)
+                if args.simulate:
+                    res = crawl_device_simulated(ip)
+                else:
+                    res = crawl_device(ip, item["ports"], username, password, secret)
                 with devices_lock:
                     if res["status"] == "success":
-                        scanned_devices[ip] = res
+                         scanned_devices[ip] = res
                     elif res["status"] == "partial":
-                        scanned_devices[ip] = res
-                        failed_devices.append({"ip": ip, "reason": res["reason"], "status": "partial"})
+                         scanned_devices[ip] = res
+                         failed_devices.append({"ip": ip, "reason": res["reason"], "status": "partial"})
                     else:
-                        failed_devices.append({"ip": ip, "reason": res["reason"], "status": "failed"})
+                         failed_devices.append({"ip": ip, "reason": res["reason"], "status": "failed"})
             except Exception as e:
                 print(f"[{ip}] Unexpected error in crawler worker: {e}")
                 with devices_lock:
@@ -596,14 +743,25 @@ def main():
     # Generate Deliverables
     print("\n--- Phase 4: Generating Deliverables ---")
     if scanned_devices:
-        report_generator.generate_asset_inventory(scanned_devices)
-        report_generator.generate_l2_diagram(scanned_devices)
-        report_generator.generate_l3_diagram(scanned_devices)
-        report_generator.generate_network_analysis_report(scanned_devices)
-        report_generator.generate_best_practices_report(scanned_devices)
-        report_generator.generate_cabling_matrix(scanned_devices)
-        report_generator.generate_protocol_translation(scanned_devices)
-        report_generator.generate_config_variables(scanned_devices)
+        deliv_dir = "deliverables"
+        inv_dir = os.path.join(deliv_dir, "inventory")
+        diag_dir = os.path.join(deliv_dir, "diagrams")
+        analysis_dir = os.path.join(deliv_dir, "analysis")
+        mig_dir = os.path.join(deliv_dir, "migration")
+        
+        os.makedirs(inv_dir, exist_ok=True)
+        os.makedirs(diag_dir, exist_ok=True)
+        os.makedirs(analysis_dir, exist_ok=True)
+        os.makedirs(mig_dir, exist_ok=True)
+
+        report_generator.generate_asset_inventory(scanned_devices, os.path.join(inv_dir, "asset_inventory.csv"))
+        report_generator.generate_l2_diagram(scanned_devices, os.path.join(diag_dir, "L2_network_diagrams.md"))
+        report_generator.generate_l3_diagram(scanned_devices, os.path.join(diag_dir, "L3_network_diagrams.md"))
+        report_generator.generate_network_analysis_report(scanned_devices, os.path.join(analysis_dir, "network_analysis_report.md"))
+        report_generator.generate_best_practices_report(scanned_devices, os.path.join(analysis_dir, "Cisco_Best_Practices.md"))
+        report_generator.generate_cabling_matrix(scanned_devices, os.path.join(mig_dir, "migration_cabling_matrix.csv"))
+        report_generator.generate_protocol_translation(scanned_devices, os.path.join(mig_dir, "cisco_to_target_translation.md"))
+        report_generator.generate_config_variables(scanned_devices, os.path.join(mig_dir, "migration_config_variables.json"))
         
         if args.baseline:
             report_generator.save_baseline_state(scanned_devices, args.baseline)
