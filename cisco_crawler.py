@@ -40,6 +40,23 @@ BACKUPS_DIR = "backups"
 os.makedirs(RAW_LOGS_DIR, exist_ok=True)
 os.makedirs(BACKUPS_DIR, exist_ok=True)
 
+VERBOSE = False
+
+def log_debug(msg):
+    if VERBOSE:
+        print(f"[DEBUG] {msg}")
+
+def send_command_paced(conn, command, mgmt_method):
+    """Sends a CLI command to the connection, pacing executions if Telnet is used to protect legacy CPU."""
+    if mgmt_method == "Telnet":
+        log_debug(f"Pacing Telnet: sleeping 1.0 second before executing '{command}'...")
+        time.sleep(1.0)
+    res = conn.send_command(command)
+    if mgmt_method == "Telnet":
+        log_debug(f"Pacing Telnet: sleeping 0.5 seconds after executing '{command}'...")
+        time.sleep(0.5)
+    return res
+
 def get_local_ip_subnet():
     """Gets the default local IP and guesses the /24 subnet."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -198,16 +215,23 @@ def run_python_port_scan(subnets):
         except Exception as e:
             print(f"Invalid subnet range ignored: {subnet} ({e})")
             
-    print(f"Scanning {len(ips_to_scan)} IP addresses on ports 22 and 23...")
+    total_ips = len(ips_to_scan)
+    print(f"Scanning {total_ips} IP addresses on ports 22 and 23...")
     
+    completed = 0
     # Run scan with thread pool and yield results as they finish
     with ThreadPoolExecutor(max_workers=50) as executor:
         futures = {executor.submit(python_port_scan_worker, ip, [22, 23]): ip for ip in ips_to_scan}
         for future in as_completed(futures):
+            completed += 1
             res = future.result()
             if res:
-                print(f"  Discovered active host: {res['ip']} (Open ports: {res['ports']})")
+                print(f"\n[+] Discovered active host: {res['ip']} (Open ports: {res['ports']})")
                 yield res
+            if completed % 10 == 0 or completed == total_ips:
+                sys.stdout.write(f"\r[*] Scan progress: {completed}/{total_ips} IPs checked...")
+                sys.stdout.flush()
+    print()
 
 def run_simulation_scan(subnets):
     """
@@ -360,12 +384,20 @@ def connect_and_detect(ip, username, password, secret, conn_type="ssh"):
         device['auth_timeout'] = 60
         device['fast_cli'] = False
         device['session_log'] = os.path.join(RAW_LOGS_DIR, f"{ip}_telnet_session.log")
+        device['global_delay_factor'] = 4  # Increase delay factor for old/slow Telnet devices
         
+    log_debug(f"[{ip}] Initializing Netmiko ConnectHandler with device_type={device_type}...")
     # Establish connection
     net_connect = ConnectHandler(**device)
+    log_debug(f"[{ip}] Connection established. Prompt detected: {net_connect.find_prompt()}")
     
     # Send commands to verify OS type
+    log_debug(f"[{ip}] Sending 'show version' to detect OS...")
+    if conn_type == 'telnet':
+        time.sleep(1.0)
     version_output = net_connect.send_command('show version')
+    if conn_type == 'telnet':
+        time.sleep(0.5)
     
     detected_os = 'cisco_ios'
     if 'NX-OS' in version_output or 'Nexus' in version_output:
@@ -373,14 +405,17 @@ def connect_and_detect(ip, username, password, secret, conn_type="ssh"):
     elif 'IOS-XR' in version_output or 'IOS XR' in version_output:
         detected_os = 'cisco_xr'
         
+    log_debug(f"[{ip}] Detected OS type: {detected_os}")
     # If the detected OS isn't standard IOS, reconnect with the matching driver
     if detected_os != 'cisco_ios':
+        log_debug(f"[{ip}] Re-connecting with detected driver: {detected_os}...")
         net_connect.disconnect()
         device['device_type'] = detected_os + ('_telnet' if conn_type == 'telnet' else '')
         # XR doesn't use enable secret
         if detected_os == 'cisco_xr' and 'secret' in device:
             del device['secret']
         net_connect = ConnectHandler(**device)
+        log_debug(f"[{ip}] Connection re-established with driver: {device['device_type']}")
         
     return net_connect, detected_os
 
@@ -400,7 +435,20 @@ def crawl_device(ip, ports, username, password, secret):
             conn, os_type = connect_and_detect(ip, username, password, secret, conn_type="ssh")
             mgmt_method = "SSH"
         except Exception as e:
-            print(f"[{ip}] SSH connection failed: {e}")
+            err_type = type(e).__name__
+            err_msg = str(e).split('\n')[0]
+            if VERBOSE:
+                import traceback
+                print(f"[{ip}] SSH connection failed with full traceback:\n{traceback.format_exc()}")
+            else:
+                if "Authentication" in err_type or "auth" in err_msg.lower():
+                    print(f"[{ip}] SSH connection failed: Authentication failed.")
+                elif "Timeout" in err_type or "timed out" in err_msg.lower():
+                    print(f"[{ip}] SSH connection failed: Connection timed out.")
+                elif "ConnectionRefused" in err_type or "refused" in err_msg.lower():
+                    print(f"[{ip}] SSH connection failed: Connection refused.")
+                else:
+                    print(f"[{ip}] SSH connection failed: {err_msg}")
             
     # Try Telnet fallback if SSH failed or only port 23 is open
     if not conn and 23 in ports:
@@ -409,7 +457,20 @@ def crawl_device(ip, ports, username, password, secret):
             conn, os_type = connect_and_detect(ip, username, password, secret, conn_type="telnet")
             mgmt_method = "Telnet"
         except Exception as e:
-            print(f"[{ip}] Telnet connection failed: {e}")
+            err_type = type(e).__name__
+            err_msg = str(e).split('\n')[0]
+            if VERBOSE:
+                import traceback
+                print(f"[{ip}] Telnet connection failed with full traceback:\n{traceback.format_exc()}")
+            else:
+                if "Authentication" in err_type or "auth" in err_msg.lower():
+                    print(f"[{ip}] Telnet connection failed: Authentication failed.")
+                elif "Timeout" in err_type or "timed out" in err_msg.lower():
+                    print(f"[{ip}] Telnet connection failed: Connection timed out.")
+                elif "ConnectionRefused" in err_type or "refused" in err_msg.lower():
+                    print(f"[{ip}] Telnet connection failed: Connection refused.")
+                else:
+                    print(f"[{ip}] Telnet connection failed: {err_msg}")
             
     if not conn:
         return {"ip": ip, "status": "failed", "reason": "Connection failed (both SSH and Telnet)"}
@@ -438,24 +499,35 @@ def crawl_device(ip, ports, username, password, secret):
         # Enter enable mode if secret is provided and device is IOS/NX-OS
         if secret and os_type != 'cisco_xr':
             try:
+                log_debug(f"[{ip}] Entering enable mode...")
                 conn.enable()
-            except Exception:
+                log_debug(f"[{ip}] Successfully entered enable mode.")
+                if mgmt_method == "Telnet":
+                    time.sleep(1.0)
+            except Exception as e:
+                log_debug(f"[{ip}] Failed to enter enable mode: {e}")
                 pass
                 
         # 1. Version information
-        sh_ver = conn.send_command('show version')
+        log_debug(f"[{ip}] Executing 'show version'...")
+        sh_ver = send_command_paced(conn, 'show version', mgmt_method)
+        log_debug(f"[{ip}] Saving show version response ({len(sh_ver)} chars) to raw logs...")
         with open(os.path.join(RAW_LOGS_DIR, f"{ip}_show_version.log"), "w") as f:
             f.write(sh_ver)
             
         ver_data = parser.parse_show_version(sh_ver, os_type)
         device_data.update(ver_data)
+        log_debug(f"[{ip}] Detected Hostname: {device_data.get('hostname')}, OS/Firmware: {device_data.get('firmware')}")
         
         # 2. Inventory check (highly reliable model/serial)
         try:
-            sh_inv = conn.send_command('show inventory')
+            log_debug(f"[{ip}] Executing 'show inventory'...")
+            sh_inv = send_command_paced(conn, 'show inventory', mgmt_method)
+            log_debug(f"[{ip}] Saving show inventory response ({len(sh_inv)} chars) to raw logs...")
             with open(os.path.join(RAW_LOGS_DIR, f"{ip}_show_inventory.log"), "w") as f:
                 f.write(sh_inv)
             inv_items = parser.parse_show_inventory(sh_inv)
+            log_debug(f"[{ip}] Parsed {len(inv_items)} inventory items.")
             # Find chassis module for primary model/serial
             for item in inv_items:
                 if "chassis" in item["name"].lower() or "chassis" in item["descr"].lower():
@@ -472,21 +544,28 @@ def crawl_device(ip, ports, username, password, secret):
                         if item["pid"]:
                             device_data["model"] = item["pid"]
                         break
-        except Exception:
+            log_debug(f"[{ip}] Extracted Model: {device_data.get('model')}, Serial: {device_data.get('serial')}")
+        except Exception as e:
+            log_debug(f"[{ip}] Show inventory query failed: {e}")
             pass
             
         # Ensure we clean hostname from prompt if still empty
         if not device_data["hostname"]:
             device_data["hostname"] = conn.find_prompt().replace('#', '').replace('>', '').strip()
+            log_debug(f"[{ip}] Hostname defaulted from prompt: {device_data['hostname']}")
             
         # 3. Interfaces L3 list
         sh_ip_int_cmd = 'show ipv4 interface brief' if os_type == 'cisco_xr' else 'show ip interface brief'
-        sh_ip_int = conn.send_command(sh_ip_int_cmd)
+        log_debug(f"[{ip}] Executing '{sh_ip_int_cmd}'...")
+        sh_ip_int = send_command_paced(conn, sh_ip_int_cmd, mgmt_method)
         device_data["l3_interfaces"] = parser.parse_ip_interface_brief(sh_ip_int, os_type)
+        log_debug(f"[{ip}] Parsed {len(device_data['l3_interfaces'])} L3 interface entries.")
         
         # 4. Interfaces physical details
-        sh_ints = conn.send_command('show interfaces')
+        log_debug(f"[{ip}] Executing 'show interfaces'...")
+        sh_ints = send_command_paced(conn, 'show interfaces', mgmt_method)
         device_data["interfaces_detail"] = parser.parse_show_interfaces(sh_ints, os_type)
+        log_debug(f"[{ip}] Parsed detailed info for {len(device_data['interfaces_detail'])} physical interfaces.")
         
         # Try to locate base MAC address from interfaces if show version failed
         if not device_data["mac_address"]:
@@ -494,6 +573,7 @@ def crawl_device(ip, ports, username, password, secret):
             for intf_name, intf_data in device_data["interfaces_detail"].items():
                 if intf_data.get("mac_address"):
                     device_data["mac_address"] = oui_lookup.normalize_mac(intf_data["mac_address"])
+                    log_debug(f"[{ip}] Base MAC address extracted from interface {intf_name}: {device_data['mac_address']}")
                     break
                     
         # 5. CDP & LLDP Neighbors
@@ -501,16 +581,20 @@ def crawl_device(ip, ports, username, password, secret):
         # CDP
         if os_type != 'cisco_xr':
             try:
-                sh_cdp = conn.send_command('show cdp neighbors detail')
+                log_debug(f"[{ip}] Executing 'show cdp neighbors detail'...")
+                sh_cdp = send_command_paced(conn, 'show cdp neighbors detail', mgmt_method)
                 neighbors.extend(parser.parse_cdp_neighbors_detail(sh_cdp))
-            except Exception:
+            except Exception as e:
+                log_debug(f"[{ip}] CDP neighbor query failed: {e}")
                 pass
         # LLDP
         try:
             sh_lldp_cmd = 'show lldp neighbors' if os_type == 'cisco_xr' else 'show lldp neighbors detail'
-            sh_lldp = conn.send_command(sh_lldp_cmd)
+            log_debug(f"[{ip}] Executing '{sh_lldp_cmd}'...")
+            sh_lldp = send_command_paced(conn, sh_lldp_cmd, mgmt_method)
             neighbors.extend(parser.parse_lldp_neighbors_detail(sh_lldp))
-        except Exception:
+        except Exception as e:
+            log_debug(f"[{ip}] LLDP neighbor query failed: {e}")
             pass
             
         # De-duplicate neighbors
@@ -519,25 +603,31 @@ def crawl_device(ip, ports, username, password, secret):
             key = (n["local_port"], n["remote_device"])
             unique_neighbors[key] = n
         device_data["neighbors"] = list(unique_neighbors.values())
+        log_debug(f"[{ip}] Total unique neighbors parsed: {len(device_data['neighbors'])}")
         
         # 6. Spanning Tree (STP)
         if os_type != 'cisco_xr':
             try:
-                sh_stp = conn.send_command('show spanning-tree')
+                log_debug(f"[{ip}] Executing 'show spanning-tree'...")
+                sh_stp = send_command_paced(conn, 'show spanning-tree', mgmt_method)
                 device_data["stp"] = parser.parse_spanning_tree(sh_stp, os_type)
-            except Exception:
+            except Exception as e:
+                log_debug(f"[{ip}] Spanning-tree query failed: {e}")
                 device_data["stp"] = {"enabled": False, "vlans": {}}
         else:
             device_data["stp"] = {"enabled": False, "vlans": {}}
             
         # 7. Routing table
         sh_route_cmd = 'show route' if os_type == 'cisco_xr' else 'show ip route'
-        sh_route = conn.send_command(sh_route_cmd)
+        log_debug(f"[{ip}] Executing '{sh_route_cmd}'...")
+        sh_route = send_command_paced(conn, sh_route_cmd, mgmt_method)
         device_data["routes"] = parser.parse_show_ip_route(sh_route, os_type)
+        log_debug(f"[{ip}] Parsed {len(device_data['routes'])} routes.")
         
         # 8. Services config from running-config
         try:
-            sh_run = conn.send_command('show running-config')
+            log_debug(f"[{ip}] Executing 'show running-config'...")
+            sh_run = send_command_paced(conn, 'show running-config', mgmt_method)
             device_data["raw_config"] = sh_run
             device_data["services"] = parser.parse_services(sh_run)
             
@@ -574,7 +664,13 @@ def main():
     parser_arg.add_argument("--baseline", help="Save the scanned network state as a baseline JSON file")
     parser_arg.add_argument("--compare", help="Compare current network state against a baseline JSON file")
     parser_arg.add_argument("--simulate", action="store_true", help="Simulate/mock network scan and switch crawling")
+    parser_arg.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging / debug output")
     args = parser_arg.parse_args()
+    
+    global VERBOSE
+    VERBOSE = args.verbose
+    if VERBOSE:
+        print("[*] Verbose logging / debug output is ENABLED.")
     
     # Download OUI registry if not found
     if not os.path.exists(oui_lookup.OUI_FILE):
@@ -605,9 +701,16 @@ def main():
         local_ip, local_subnet = get_local_ip_subnet()
         subnets_input = args.subnets
         if not subnets_input:
-            subnets_input = input(f"Enter target subnets to scan (comma separated) [Default: {local_subnet}]: ").strip()
+            default_sub = "192.168.1.0/24" if args.simulate else local_subnet
+            if sys.stdin.isatty():
+                try:
+                    subnets_input = input(f"Enter target subnets to scan (comma separated) [Default: {default_sub}]: ").strip()
+                except (EOFError, OSError):
+                    subnets_input = ""
+            else:
+                subnets_input = ""
             if not subnets_input:
-                subnets_input = local_subnet
+                subnets_input = default_sub
                 
         subnets = [s.strip() for s in subnets_input.split(',')]
         
@@ -626,13 +729,19 @@ def main():
             
     # Prompt for credentials first
     print("\n--- Phase 1: Credentials Input ---")
-    username = input("Enter SSH/Telnet username: ").strip()
-    if sys.stdin.isatty():
-        password = getpass.getpass("Enter password: ")
-        secret = getpass.getpass("Enter enable secret (press Enter if none): ")
+    if args.simulate:
+        print("[*] Simulation mode enabled. Using default mock credentials.")
+        username = "admin"
+        password = "password"
+        secret = "secret"
     else:
-        password = input("Enter password: ").strip()
-        secret = input("Enter enable secret (press Enter if none): ").strip()
+        username = input("Enter SSH/Telnet username: ").strip()
+        if sys.stdin.isatty():
+            password = getpass.getpass("Enter password: ")
+            secret = getpass.getpass("Enter enable secret (press Enter if none): ")
+        else:
+            password = input("Enter password: ").strip()
+            secret = input("Enter enable secret (press Enter if none): ").strip()
 
     if not args.retry:
         print("\n--- Phase 2: Subnet Discovery ---")
@@ -745,7 +854,8 @@ def main():
                 print(f"[{ip}] Non-Cisco vendor detected: {vendor} ({mac})")
                 
     # Generate Deliverables
-    print("\n--- Phase 4: Generating Deliverables ---")
+    # Generate Deliverables
+    print("\n--- Phase 5: Generating Deliverables ---")
     if scanned_devices:
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         deliv_dir = os.path.join("deliverables", f"run_{timestamp}")
@@ -759,19 +869,46 @@ def main():
         os.makedirs(analysis_dir, exist_ok=True)
         os.makedirs(mig_dir, exist_ok=True)
 
-        report_generator.generate_asset_inventory(scanned_devices, os.path.join(inv_dir, "asset_inventory.csv"))
-        report_generator.generate_l2_diagram(scanned_devices, os.path.join(diag_dir, "L2_network_diagrams.md"))
-        report_generator.generate_l3_diagram(scanned_devices, os.path.join(diag_dir, "L3_network_diagrams.md"))
-        report_generator.generate_network_analysis_report(scanned_devices, os.path.join(analysis_dir, "network_analysis_report.md"))
-        report_generator.generate_best_practices_report(scanned_devices, os.path.join(analysis_dir, "Cisco_Best_Practices.md"))
-        report_generator.generate_cabling_matrix(scanned_devices, os.path.join(mig_dir, "migration_cabling_matrix.csv"))
-        report_generator.generate_protocol_translation(scanned_devices, os.path.join(mig_dir, "cisco_to_target_translation.md"))
-        report_generator.generate_config_variables(scanned_devices, os.path.join(mig_dir, "migration_config_variables.json"))
+        print(f"[+] Output directory created: {deliv_dir}")
+
+        asset_file = os.path.join(inv_dir, "asset_inventory.csv")
+        report_generator.generate_asset_inventory(scanned_devices, asset_file)
+        print(f"  - Asset Inventory: {asset_file}")
+
+        l2_diag = os.path.join(diag_dir, "L2_network_diagrams.md")
+        report_generator.generate_l2_diagram(scanned_devices, l2_diag)
+        print(f"  - L2 Network Diagrams: {l2_diag}")
+
+        l3_diag = os.path.join(diag_dir, "L3_network_diagrams.md")
+        report_generator.generate_l3_diagram(scanned_devices, l3_diag)
+        print(f"  - L3 Network Diagrams: {l3_diag}")
+
+        analysis_report = os.path.join(analysis_dir, "network_analysis_report.md")
+        report_generator.generate_network_analysis_report(scanned_devices, analysis_report)
+        print(f"  - Network Analysis Report: {analysis_report}")
+
+        best_practices = os.path.join(analysis_dir, "Cisco_Best_Practices.md")
+        report_generator.generate_best_practices_report(scanned_devices, best_practices)
+        print(f"  - Cisco Best Practices: {best_practices}")
+
+        cable_matrix = os.path.join(mig_dir, "migration_cabling_matrix.csv")
+        report_generator.generate_cabling_matrix(scanned_devices, cable_matrix)
+        print(f"  - Migration Cabling Matrix: {cable_matrix}")
+
+        protocol_trans = os.path.join(mig_dir, "cisco_to_target_translation.md")
+        report_generator.generate_protocol_translation(scanned_devices, protocol_trans)
+        print(f"  - Protocol Translation Guide: {protocol_trans}")
+
+        config_vars = os.path.join(mig_dir, "migration_config_variables.json")
+        report_generator.generate_config_variables(scanned_devices, config_vars)
+        print(f"  - Configuration Variables: {config_vars}")
         
         if args.baseline:
             report_generator.save_baseline_state(scanned_devices, args.baseline)
+            print(f"  - Saved network baseline state to: {args.baseline}")
         if args.compare:
             report_generator.compare_baseline_state(scanned_devices, args.compare)
+            print(f"  - Compared current state against baseline: {args.compare}")
     else:
         print("No devices were successfully scanned. Skipping reports generation.")
         

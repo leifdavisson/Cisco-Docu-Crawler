@@ -240,8 +240,52 @@ function Run-Discovery {
         return
     }
 
+    $verboseOpt = Read-Host "Enable verbose logging? (y/N)"
+    $verboseFlag = ""
+    if ($verboseOpt -match "^[Yy]$") {
+        $verboseFlag = "--verbose"
+    }
+
     Write-Host "`n[*] Starting Cisco Network Discovery Scan..." -ForegroundColor Cyan
-    & $global:PythonCmd cisco_crawler.py
+    if ($verboseFlag) {
+        & $global:PythonCmd cisco_crawler.py $verboseFlag
+    } else {
+        & $global:PythonCmd cisco_crawler.py
+    }
+}
+
+function Run-Simulation {
+    if (-not $global:PythonCmd) {
+        Write-Host "[!] Error: Python 3 must be installed to run the discovery scanner." -ForegroundColor Red
+        return
+    }
+    
+    # Check dependencies before running (in simulation, only netaddr is strictly required)
+    $hasLibs = $true
+    try {
+        $null = & $global:PythonCmd -c "import netaddr" 2>&1
+        if ($LASTEXITCODE -ne 0) { $hasLibs = $false }
+    } catch {
+        $hasLibs = $false
+    }
+    
+    if (-not $hasLibs) {
+        Write-Host "[!] Error: Required library (netaddr) is missing. Select Option 1 first." -ForegroundColor Red
+        return
+    }
+
+    $verboseOpt = Read-Host "Enable verbose logging? (y/N)"
+    $verboseFlag = ""
+    if ($verboseOpt -match "^[Yy]$") {
+        $verboseFlag = "--verbose"
+    }
+
+    Write-Host "`n[*] Starting Simulated Network Discovery Scan (Demo Mode)..." -ForegroundColor Cyan
+    if ($verboseFlag) {
+        & $global:PythonCmd cisco_crawler.py --simulate $verboseFlag
+    } else {
+        & $global:PythonCmd cisco_crawler.py --simulate
+    }
 }
 
 function Retry-Scan {
@@ -286,30 +330,32 @@ while ($true) {
     Write-Host "`nOperations Menu:" -ForegroundColor Cyan
     Write-Host "  1) " -NoNewline; Write-Host "Initialize Environment" -ForegroundColor Green -NoNewline; Write-Host " (Install Python + Crawler Packages)"
     Write-Host "  2) " -NoNewline; Write-Host "Run New Discovery Scan" -ForegroundColor Green
-    Write-Host "  3) " -NoNewline; Write-Host "Retry/Resume Failed Devices" -ForegroundColor Green -NoNewline; Write-Host " (Loads failed_hosts.json)"
-    Write-Host "  4) " -NoNewline; Write-Host "List Current Backups" -ForegroundColor Green
-    Write-Host "  5) " -NoNewline; Write-Host "Install Nmap Utility" -ForegroundColor Green -NoNewline; Write-Host " (Optional)"
-    Write-Host "  6) " -NoNewline; Write-Host "Exit" -ForegroundColor Red
+    Write-Host "  3) " -NoNewline; Write-Host "Run Simulated Discovery (Demo Mode)" -ForegroundColor Green
+    Write-Host "  4) " -NoNewline; Write-Host "Retry/Resume Failed Devices" -ForegroundColor Green -NoNewline; Write-Host " (Loads failed_hosts.json)"
+    Write-Host "  5) " -NoNewline; Write-Host "List Current Backups" -ForegroundColor Green
+    Write-Host "  6) " -NoNewline; Write-Host "Install Nmap Utility" -ForegroundColor Green -NoNewline; Write-Host " (Optional)"
+    Write-Host "  7) " -NoNewline; Write-Host "Exit" -ForegroundColor Red
     Write-Host "----------------------------------------------------------------"
 
-    $selection = Read-Host "Select option (1-6)"
+    $selection = Read-Host "Select option (1-7)"
 
     switch ($selection) {
         "1" { Install-Dependencies }
         "2" { Run-Discovery }
-        "3" { Retry-Scan }
-        "4" { List-Backups }
-        "5" { Install-Nmap }
-        "6" { 
+        "3" { Run-Simulation }
+        "4" { Retry-Scan }
+        "5" { List-Backups }
+        "6" { Install-Nmap }
+        "7" { 
             Write-Host "`nExiting Windows Operator Shell. Goodbye!`n" -ForegroundColor Green
             break
         }
         default {
-            Write-Host "[!] Invalid selection. Please choose a number between 1 and 6." -ForegroundColor Red
+            Write-Host "[!] Invalid selection. Please choose a number between 1 and 7." -ForegroundColor Red
         }
     }
 
-    if ($selection -eq "6") { break }
+    if ($selection -eq "7") { break }
 
     Write-Host "`nPress [Enter] to return to the menu..."
     Read-Host

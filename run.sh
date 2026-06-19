@@ -85,8 +85,23 @@ install_dependencies() {
 }
 
 run_discovery() {
+    read -p "Enable verbose logging? (y/N): " verbose_opt
+    VERBOSE_FLAG=""
+    if [[ "$verbose_opt" =~ ^[Yy]$ ]]; then
+        VERBOSE_FLAG="--verbose"
+    fi
     echo -e "\n${BLUE}[*] Starting New Network Discovery Scan...${NC}"
-    python3 cisco_crawler.py
+    python3 cisco_crawler.py $VERBOSE_FLAG
+}
+
+run_simulation() {
+    read -p "Enable verbose logging? (y/N): " verbose_opt
+    VERBOSE_FLAG=""
+    if [[ "$verbose_opt" =~ ^[Yy]$ ]]; then
+        VERBOSE_FLAG="--verbose"
+    fi
+    echo -e "\n${BLUE}[*] Starting Simulated Network Discovery Scan (Demo Mode)...${NC}"
+    python3 cisco_crawler.py --simulate $VERBOSE_FLAG
 }
 
 retry_scan() {
@@ -118,12 +133,13 @@ while true; do
     echo -e "\n${BLUE}Operations Menu:${NC}"
     echo -e "  1) ${GREEN}Initialize Environment${NC} (Install Python packages)"
     echo -e "  2) ${GREEN}Run a New Discovery Scan${NC}"
-    echo -e "  3) ${GREEN}Retry/Resume Failed Devices${NC} (Loads failed_hosts.json)"
-    echo -e "  4) ${GREEN}List Current Backups${NC}"
-    echo -e "  5) ${RED}Exit${NC}"
+    echo -e "  3) ${GREEN}Run Simulated Discovery (Demo Mode)${NC}"
+    echo -e "  4) ${GREEN}Retry/Resume Failed Devices${NC} (Loads failed_hosts.json)"
+    echo -e "  5) ${GREEN}List Current Backups${NC}"
+    echo -e "  6) ${RED}Exit${NC}"
     echo -e "----------------------------------------------------------------"
     
-    read -p "Select option (1-5): " opt
+    read -p "Select option (1-6): " opt
     
     case $opt in
         1)
@@ -133,17 +149,20 @@ while true; do
             run_discovery
             ;;
         3)
-            retry_scan
+            run_simulation
             ;;
         4)
-            list_backups
+            retry_scan
             ;;
         5)
+            list_backups
+            ;;
+        6)
             echo -e "\n${GREEN}Exiting Operator Shell. Goodbye!${NC}\n"
             exit 0
             ;;
         *)
-            echo -e "${RED}[!] Invalid option. Please select between 1 and 5.${NC}"
+            echo -e "${RED}[!] Invalid option. Please select between 1 and 6.${NC}"
             ;;
     esac
     
