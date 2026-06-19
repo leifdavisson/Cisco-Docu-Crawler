@@ -624,7 +624,18 @@ def main():
             print("No valid target subnets to scan. Exiting.")
             sys.exit(1)
             
-        print("\n--- Phase 1: Subnet Discovery ---")
+    # Prompt for credentials first
+    print("\n--- Phase 1: Credentials Input ---")
+    username = input("Enter SSH/Telnet username: ").strip()
+    if sys.stdin.isatty():
+        password = getpass.getpass("Enter password: ")
+        secret = getpass.getpass("Enter enable secret (press Enter if none): ")
+    else:
+        password = input("Enter password: ").strip()
+        secret = input("Enter enable secret (press Enter if none): ").strip()
+
+    if not args.retry:
+        print("\n--- Phase 2: Subnet Discovery ---")
         if args.simulate:
             host_generator = run_simulation_scan(valid_subnets)
         elif check_nmap_installed():
@@ -646,13 +657,11 @@ def main():
         
     print(f"\n[+] Discovered first active host: {first_host['ip']} (Open ports: {first_host['ports']})")
             
-    # Prompt for credentials
-    username = ""
-    password = ""
-    secret = ""
-    
-    while True:
-        print(f"\n--- Phase 2: Credentials Input (Validating on first host: {first_host['ip']}) ---")
+    # Validate the credentials entered earlier
+    print("\n--- Phase 3: Credentials Validation ---")
+    print(f"[*] Validating credentials on {first_host['ip']}...")
+    while not validate_credentials(first_host["ip"], first_host["ports"], username, password, secret, simulate=args.simulate):
+        print("[!] Credentials validation failed. Please try again.")
         username = input("Enter SSH/Telnet username: ").strip()
         if sys.stdin.isatty():
             password = getpass.getpass("Enter password: ")
@@ -660,15 +669,10 @@ def main():
         else:
             password = input("Enter password: ").strip()
             secret = input("Enter enable secret (press Enter if none): ").strip()
-        
         print(f"[*] Validating credentials on {first_host['ip']}...")
-        if validate_credentials(first_host["ip"], first_host["ports"], username, password, secret, simulate=args.simulate):
-            print("[+] Credentials verified successfully!")
-            break
-        else:
-            print("[!] Credentials validation failed. Please try again.")
+    print("[+] Credentials verified successfully!")
     
-    print("\n--- Phase 3: Switch Discovery Crawl (Concurrent Scan & Crawl) ---")
+    print("\n--- Phase 4: Switch Discovery Crawl (Concurrent Scan & Crawl) ---")
     scanned_devices = {}
     failed_devices = []
     devices_lock = threading.Lock()
@@ -743,7 +747,8 @@ def main():
     # Generate Deliverables
     print("\n--- Phase 4: Generating Deliverables ---")
     if scanned_devices:
-        deliv_dir = "deliverables"
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        deliv_dir = os.path.join("deliverables", f"run_{timestamp}")
         inv_dir = os.path.join(deliv_dir, "inventory")
         diag_dir = os.path.join(deliv_dir, "diagrams")
         analysis_dir = os.path.join(deliv_dir, "analysis")
