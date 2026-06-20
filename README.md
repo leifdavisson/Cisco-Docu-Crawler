@@ -34,7 +34,11 @@ A portable, self-contained Python 3 CLI tool that performs network discovery, lo
 * **Switch Configuration Benchmarking:** Saves running configurations as standard baselines and provides comparison diffs to track configuration drift over time.
 * **Offline OUI Lookup:** Resolves manufacturer MAC addresses using a built-in common vendor database, with automatic fallback to loading or downloading the official IEEE OUI registry.
 * **Failure Management / Retry:** Logs failed or partial hosts to `failed_hosts.json`. You can resume/retry scanning just those hosts using new credentials or network configurations.
-* **Cross-Platform Bootstrappers:** Standard shell scripts (`run.sh` for Linux/macOS) and PowerShell scripts (`run.ps1` and `run.bat` for Windows 11) handle all prerequisite checks and execution safety guards.
+* **Cross-Platform Operator Shells:** Automated interactive menu wrappers (`run.sh` for Linux/macOS and `run.ps1`/`run.bat` for Windows) streamline setup, prerequisites installation, baseline comparison, and retries.
+* **Advanced Options & Security Controls**: Hides advanced operational settings (thread pool scale, timeouts, baseline comparison, retry modes, telnet disabling) in an `Advanced Options Menu` to protect production switches from junior engineers.
+* **EOF-Safe Menus & Pipes**: Shell menus support non-interactive pipelines (e.g., piping configuration scripts via stdin) and terminate immediately upon receiving EOF.
+* **Accurate Layer 3 Subnet Analysis**: Diagnostics accurately identify overlapping nested IP subnets versus exact IP address conflicts, using standard CIDR boundary parsing.
+* **Standard Python Packaging**: Supports PEP 517 structures. Run `pip install .` to install the crawler as a system-wide CLI utility.
 
 ---
 
@@ -54,7 +58,7 @@ After a successful scan, the crawler compiles and generates the following report
 
 ## 🚀 Getting Started
 
-### Quick Start (Recommended)
+### Method 1: Interactive Menu (Recommended for Operators)
 The easiest way to initialize the environment, install requirements, and run the crawler is using the interactive menu shell:
 
 * **Linux/macOS:**
@@ -67,8 +71,26 @@ The easiest way to initialize the environment, install requirements, and run the
   ```powershell
   PowerShell.exe -ExecutionPolicy Bypass -File .\run.ps1
   ```
-
 This shell will guide you through checking requirements, installing dependencies, executing discovery, comparing baselines, retrying failed hosts, and listing backups.
+
+### Method 2: Docker Container (Recommended for Isolated Execution)
+A pre-built container package is compiled and hosted on **GitHub Container Registry (GHCR)**. It contains Python, all packages, and system-level `nmap` pre-configured.
+
+To pull and run the crawler image in a container, mounting a local volume to collect the deliverables:
+```bash
+docker run --rm -it -v "$(pwd)/deliverables:/app/deliverables" ghcr.io/leifdavisson/cisco-docu-crawler --subnets 192.168.1.0/24
+```
+*(Optionally define `CRAWLER_USER`, `CRAWLER_PASSWORD`, and `CRAWLER_SECRET` environment variables using `-e` flags to skip the credential prompt).*
+
+### Method 3: Standard Python Package (Recommended for Scripting)
+You can install the crawler directly on your host machine as a standard, system-wide command-line utility:
+```bash
+pip install .
+```
+Once installed, you can invoke the crawler from any directory simply by typing:
+```bash
+cisco-crawler
+```
 
 ---
 
