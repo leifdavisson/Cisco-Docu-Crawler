@@ -196,68 +196,117 @@ def generate_l2_diagram(devices, output_path="L2_network_diagrams.md"):
     lines.append("  %% Topology links")
     
     # 2. Draw connections from neighbors
+    connections = {}
     for ip, dev in devices.items():
         hostname = dev.get("hostname") or ip
         neighbors = dev.get("neighbors", [])
         
+        # Parse channel groups from raw config
+        channel_map = {}
+        cfg = dev.get("raw_config", "")
+        if cfg:
+            blocks = cfg.split("interface ")
+            for block in blocks[1:]:
+                block_lines = block.splitlines()
+                if not block_lines:
+                    continue
+                intf_name = block_lines[0].split()[0].strip()
+                for bl in block_lines[1:]:
+                    if bl.strip() == "!":
+                        break
+                    cg_match = re.search(r'channel-group\s+(\d+)', bl)
+                    if cg_match:
+                        channel_map[intf_name] = f"Po{cg_match.group(1)}"
+                        break
+                        
         for n in neighbors:
             remote_host = n.get("remote_device")
             if not remote_host:
                 continue
-                
-            # Clean remote hostname
             remote_host = remote_host.split('.')[0]
             
-            # Find matching remote node in scanned devices if possible to use IP/Hostname
             matched_remote = None
             for rip, rdev in devices.items():
                 rhn = rdev.get("hostname", "")
                 if rhn and rhn.split('.')[0].lower() == remote_host.lower():
                     matched_remote = rhn
                     break
-            
-            # If not in scanned devices, we still add it
+                    
             node_b = matched_remote or remote_host
             
-            # Sort node names to prevent duplicates
-            link_key = tuple(sorted([hostname, node_b]))
-            if link_key in seen_links:
-                continue
-            seen_links.add(link_key)
-            
+            # Sort names for link key to prevent duplicates
+            if hostname < node_b:
+                key = (hostname, node_b)
+            else:
+                key = (node_b, hostname)
+                
+            if key not in connections:
+                connections[key] = []
+                
             local_port = n.get("local_port", "")
             remote_port = n.get("remote_port", "")
             
-            # Determine link characteristics (e.g., STP blocking)
             is_blocked = False
             stp_vlans = dev.get("stp", {}).get("vlans", {})
             for vlan_id, ports in stp_vlans.items():
                 if local_port in ports and ports[local_port].get("state") == "BLK":
                     is_blocked = True
                     break
-            
-            # Determine link speed and thickness
+                    
             speed_val = get_link_speed(local_port, dev.get("interfaces_detail", {}))
-            thickness = {
-                "10M": "1px",
-                "100M": "2px",
-                "1G": "3.5px",
-                "2.5G": "5px",
-                "5G": "6px",
-                "10G": "7.5px",
-                "40G": "9px",
-                "100G": "11px"
-            }.get(speed_val, "3.5px")
+            po_name = channel_map.get(local_port, "")
             
-            if is_blocked:
-                # Dotted red line for blocked paths
-                lines.append(f"  {hostname} -.-> {node_b}")
-                link_styles.append(f"  linkStyle {link_idx} stroke:#ff3333,stroke-width:{thickness},stroke-dasharray: 5 5;")
-            else:
-                lines.append(f"  {hostname} === {node_b}")
-                link_styles.append(f"  linkStyle {link_idx} stroke:#333,stroke-width:{thickness};")
-                
-            link_idx += 1
+            connections[key].append({
+                "local_port": local_port,
+                "remote_port": remote_port,
+                "is_blocked": is_blocked,
+                "speed": speed_val,
+                "port_channel": po_name
+            })
+            
+    for (node_a, node_b), links in connections.items():
+        # Determine stp status: blocked if any link in bundle is blocked
+        is_blocked = any(lk["is_blocked"] for lk in links)
+        
+        # Sort and select speeds
+        def speed_key(s):
+            return {"100G": 8, "40G": 7, "10G": 6, "5G": 5, "2.5G": 4, "1G": 3, "100M": 2, "10M": 1}.get(s, 0)
+        speeds = [lk["speed"] for lk in links]
+        max_speed = max(speeds, key=speed_key) if speeds else "1G"
+        
+        thickness = {
+            "10M": "1px",
+            "100M": "2px",
+            "1G": "3.5px",
+            "2.5G": "5px",
+            "5G": "6px",
+            "10G": "7.5px",
+            "40G": "9px",
+            "100G": "11px"
+        }.get(max_speed, "3.5px")
+        
+        # Build logical label for the connection
+        pos = sorted(list(set([lk["port_channel"] for lk in links if lk["port_channel"]])))
+        if pos:
+            # Combined under port channel
+            local_ports_str = ", ".join(sorted(list(set([lk["local_port"] for lk in links]))))
+            label = f"{pos[0]} ({local_ports_str})"
+        else:
+            # Physical ports only
+            label = ", ".join(sorted(list(set([lk["local_port"] for lk in links]))))
+            
+        clean_label = label.replace('"', '\\"')
+        
+        if is_blocked:
+            # Dotted red line for blocked paths
+            lines.append(f"  {node_a} -. \"{clean_label}\" .-> {node_b}")
+            link_styles.append(f"  linkStyle {link_idx} stroke:#ff3333,stroke-width:{thickness},stroke-dasharray: 5 5;")
+        else:
+            # Thick line with port labels
+            lines.append(f"  {node_a} ===| \"{clean_label}\" | {node_b}")
+            link_styles.append(f"  linkStyle {link_idx} stroke:#333,stroke-width:{thickness};")
+            
+        link_idx += 1
 
     # 3. Add link styles
     if link_styles:
@@ -489,6 +538,47 @@ def generate_l3_diagram(devices, output_path="L3_network_diagrams.md"):
     except Exception as e:
         print(f"Error generating L3 diagram file: {e}")
 
+def parse_interface_ips_from_config(raw_config):
+    """
+    Parses interface IP addresses and subnet masks from Cisco IOS/XE/XR running-config.
+    Returns a dict mapping normalized interface name -> (ip_address, subnet_mask_or_prefix)
+    """
+    if not raw_config:
+        return {}
+    
+    intf_ips = {}
+    current_intf = None
+    
+    for line in raw_config.splitlines():
+        line_stripped = line.strip()
+        if not line_stripped:
+            continue
+            
+        # Match interface line
+        intf_match = re.match(r'^interface\s+(\S+)', line_stripped, re.IGNORECASE)
+        if intf_match:
+            current_intf = normalize_interface_name(intf_match.group(1))
+            continue
+            
+        if current_intf:
+            # Check for end of interface block (e.g. '!' or exit)
+            if line_stripped == '!' or line_stripped.lower().startswith('exit'):
+                current_intf = None
+                continue
+                
+            # Match ip address/ipv4 address
+            ip_match = re.match(
+                r'^(?:ipv4|ip)\s+address\s+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?:\s+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})|/(\d+))',
+                line_stripped,
+                re.IGNORECASE
+            )
+            if ip_match:
+                ip = ip_match.group(1)
+                mask_or_prefix = ip_match.group(2) or ip_match.group(3)
+                intf_ips[current_intf] = (ip, mask_or_prefix)
+                
+    return intf_ips
+
 def generate_network_analysis_report(devices, output_path="network_analysis_report.md"):
     """
     Generates a structured Layer 1-7 network analysis report.
@@ -622,31 +712,78 @@ def generate_network_analysis_report(devices, output_path="network_analysis_repo
     # Subnet overlaps
     lines.append("### Overlapping Subnets & IP Space Conflicts")
     ip_subnets = []
-    overlap_found = False
     
     for ip, dev in devices.items():
         hostname = dev.get("hostname") or ip
+        raw_config = dev.get("raw_config", "")
+        config_ips = parse_interface_ips_from_config(raw_config) if raw_config else {}
+        
         l3_ints = dev.get("l3_interfaces", [])
         for intf in l3_ints:
+            intf_name = intf.get("interface")
             intf_ip = intf.get("ip_address")
             if intf_ip and intf_ip not in ["unassigned", "down", "up", "unset"]:
-                try:
-                    # Parse subnet (guess /24 if not specified)
-                    net = IPNetwork(f"{intf_ip}/24")
-                    ip_subnets.append((hostname, intf.get("interface"), net))
-                except Exception:
-                    pass
-                    
-    # Compare each subnet for overlaps
+                norm_name = normalize_interface_name(intf_name)
+                ip_from_cfg, mask_from_cfg = config_ips.get(norm_name, (None, None))
+                
+                net = None
+                if ip_from_cfg == intf_ip and mask_from_cfg:
+                    try:
+                        if '/' in mask_from_cfg or mask_from_cfg.isdigit():
+                            net = IPNetwork(f"{intf_ip}/{mask_from_cfg}")
+                        else:
+                            net = IPNetwork(f"{intf_ip}/{mask_from_cfg}")
+                    except Exception:
+                        pass
+                
+                if net is None:
+                    try:
+                        # Guess /24 if not specified/parseable
+                        net = IPNetwork(f"{intf_ip}/24")
+                    except Exception:
+                        pass
+                        
+                if net:
+                    ip_subnets.append((hostname, intf_name, intf_ip, net))
+
+    ip_conflicts = []
+    subnet_overlaps = []
+    
+    # Compare each subnet for overlaps and IP conflicts
     for i in range(len(ip_subnets)):
         for j in range(i+1, len(ip_subnets)):
-            h1, int1, net1 = ip_subnets[i]
-            h2, int2, net2 = ip_subnets[j]
-            # If subnets are identical but on different devices or interfaces
-            if net1.network == net2.network and h1 != h2:
-                lines.append(f"* **Overlap Warning:** Same network range `{net1.network}/{net1.prefixlen}` configured on **{h1}** (`{int1}`) and **{h2}** (`{int2}`).")
-                overlap_found = True
+            h1, int1, ip1, net1 = ip_subnets[i]
+            h2, int2, ip2, net2 = ip_subnets[j]
+            
+            if h1 == h2:
+                continue
                 
+            # 1. Check exact IP conflict
+            if ip1 == ip2:
+                ip_conflicts.append((h1, int1, ip1, h2, int2, ip2))
+            # 2. Check subnet address space overlaps using netaddr CIDR boundaries
+            elif net1 in net2 or net2 in net1:
+                subnet_overlaps.append((h1, int1, net1, h2, int2, net2))
+                
+    overlap_found = False
+    
+    if ip_conflicts:
+        overlap_found = True
+        lines.append("#### Critical IP Address Conflicts")
+        for h1, int1, ip1, h2, int2, ip2 in ip_conflicts:
+            lines.append(f"* **CRITICAL IP CONFLICT:** IP address `{ip1}` is configured on **{h1}** (`{int1}`) and **{h2}** (`{int2}`).")
+        lines.append("")
+        
+    if subnet_overlaps:
+        overlap_found = True
+        lines.append("#### Subnet Address Space Overlaps")
+        for h1, int1, net1, h2, int2, net2 in subnet_overlaps:
+            if net1 == net2:
+                lines.append(f"* **Overlap Warning:** Identical subnet range `{net1.network}/{net1.prefixlen}` configured on **{h1}** (`{int1}`) and **{h2}** (`{int2}`).")
+            else:
+                lines.append(f"* **Overlap Warning:** Overlapping subnets: `{net1}` on **{h1}** (`{int1}`) and `{net2}` on **{h2}** (`{int2}`).")
+        lines.append("")
+        
     if not overlap_found:
         lines.append("  * No overlapping subnets or IP address space collisions detected.")
         

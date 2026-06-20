@@ -18,5 +18,5 @@ REM You should have received a copy of the GNU Affero General Public License
 REM along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 cd /d "%~dp0"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "run.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\run.ps1"
 pause

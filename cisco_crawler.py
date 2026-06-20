@@ -41,6 +41,8 @@ os.makedirs(RAW_LOGS_DIR, exist_ok=True)
 os.makedirs(BACKUPS_DIR, exist_ok=True)
 
 VERBOSE = False
+DISABLE_TELNET = False
+TIMEOUT = 10
 
 def log_debug(msg):
     if VERBOSE:
@@ -90,14 +92,14 @@ def validate_credentials(ip, ports, username, password, secret, simulate=False):
         return True
     if 22 in ports:
         try:
-            conn, _ = connect_and_detect(ip, username, password, secret, conn_type="ssh")
+            conn, _ = connect_and_detect(ip, username, password, secret, conn_type="ssh", timeout=TIMEOUT)
             conn.disconnect()
             return True
         except Exception as e:
             print(f"[*] Credential validation failed on {ip} via SSH: {e}")
-    if 23 in ports:
+    if 23 in ports and not DISABLE_TELNET:
         try:
-            conn, _ = connect_and_detect(ip, username, password, secret, conn_type="telnet")
+            conn, _ = connect_and_detect(ip, username, password, secret, conn_type="telnet", timeout=TIMEOUT)
             conn.disconnect()
             return True
         except Exception as e:
@@ -148,9 +150,10 @@ def run_nmap_scan(subnets):
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     xml_output = os.path.join(RAW_LOGS_DIR, f"nmap_results_{timestamp}.xml")
     
+    ports_str = "22" if DISABLE_TELNET else "22,23"
     print(f"\nRunning Nmap scan on target subnets: {targets}")
     print(f"[*] Saving XML output to: {xml_output}")
-    cmd = ["nmap", "-sS", "-p", "22,23", "-Pn", "-oG", "-", "-oX", xml_output] + targets
+    cmd = ["nmap", "-sS", "-p", ports_str, "-Pn", "-oG", "-", "-oX", xml_output] + targets
     
     try:
         print("[*] Starting Nmap SYN scan... (this may take a few minutes)")
@@ -162,7 +165,7 @@ def run_nmap_scan(subnets):
             stderr_content = process.stderr.read()
             if "You must be root" in stderr_content or "privileges" in stderr_content:
                 print("[*] Non-root environment/permissions detected. Falling back to Nmap TCP Connect scan (-sT)...")
-                cmd = ["nmap", "-sT", "-p", "22,23", "-Pn", "-oG", "-", "-oX", xml_output] + targets
+                cmd = ["nmap", "-sT", "-p", ports_str, "-Pn", "-oG", "-", "-oX", xml_output] + targets
                 print("[*] Starting Nmap TCP Connect scan... (this may take a few minutes)")
                 process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
             else:
@@ -181,12 +184,12 @@ def run_nmap_scan(subnets):
     except Exception as e:
         print(f"[!] Nmap scan error: {e}")
 
-def python_port_scan_worker(ip, ports):
-    """Worker thread to scan ports 22 and 23 on a single IP."""
+def python_port_scan_worker(ip, ports, timeout=0.5):
+    """Worker thread to scan ports on a single IP."""
     open_ports = []
     for port in ports:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(0.5)
+        s.settimeout(timeout)
         try:
             result = s.connect_ex((ip, port))
             if result == 0:
@@ -216,12 +219,15 @@ def run_python_port_scan(subnets):
             print(f"Invalid subnet range ignored: {subnet} ({e})")
             
     total_ips = len(ips_to_scan)
-    print(f"Scanning {total_ips} IP addresses on ports 22 and 23...")
+    ports_to_scan = [22] if DISABLE_TELNET else [22, 23]
+    ports_str = "port 22" if DISABLE_TELNET else "ports 22 and 23"
+    print(f"Scanning {total_ips} IP addresses on {ports_str}...")
     
     completed = 0
     # Run scan with thread pool and yield results as they finish
+    scan_timeout = max(0.5, TIMEOUT / 10.0)
     with ThreadPoolExecutor(max_workers=50) as executor:
-        futures = {executor.submit(python_port_scan_worker, ip, [22, 23]): ip for ip in ips_to_scan}
+        futures = {executor.submit(python_port_scan_worker, ip, ports_to_scan, scan_timeout): ip for ip in ips_to_scan}
         for future in as_completed(futures):
             completed += 1
             res = future.result()
@@ -253,10 +259,11 @@ def run_simulation_scan(subnets):
                 ips = [str(ip) for ip in list(net)]
                 
             print(f"  Simulating scan of subnet {subnet} ({len(net)} IPs). Yielding {len(ips)} simulated active hosts...")
+            sim_ports = [22] if DISABLE_TELNET else [22, 23]
             for ip in ips:
                 time.sleep(0.1) # Simulate real-time discovery delay
-                print(f"  Discovered active host (simulated): {ip} (Open ports: [22, 23])")
-                yield {"ip": ip, "mac": f"00:11:22:33:44:{hash(ip) & 0xff:02x}", "ports": [22, 23]}
+                print(f"  Discovered active host (simulated): {ip} (Open ports: {sim_ports})")
+                yield {"ip": ip, "mac": f"00:11:22:33:44:{hash(ip) & 0xff:02x}", "ports": sim_ports}
         except Exception as e:
             print(f"Invalid subnet range ignored in simulation: {subnet} ({e})")
 
@@ -361,12 +368,13 @@ def crawl_device_simulated(ip):
     print(f"[{ip}] Scanned successfully (simulated). Hostname: {hostname}, Model: {model}")
     return device_data
 
-def connect_and_detect(ip, username, password, secret, conn_type="ssh"):
+def connect_and_detect(ip, username, password, secret, conn_type="ssh", timeout=None):
     """
     Connects to the switch and detects the specific Cisco OS type.
     Returns the active netmiko connection object and the detected OS string.
     """
     from netmiko import ConnectHandler
+    from netmiko.exceptions import NetmikoTimeoutException, NetmikoAuthenticationException
     
     device_type = 'cisco_ios' if conn_type == 'ssh' else 'cisco_ios_telnet'
     
@@ -379,18 +387,52 @@ def connect_and_detect(ip, username, password, secret, conn_type="ssh"):
         'global_delay_factor': 2,
     }
     
+    if timeout is not None:
+        device['timeout'] = timeout
+        device['auth_timeout'] = timeout
+    
     if conn_type == 'telnet':
         # Optimize for slower/older Telnet connections and enable logging for troubleshooting
-        device['auth_timeout'] = 60
+        if timeout is None:
+            device['auth_timeout'] = 60
         device['fast_cli'] = False
         device['session_log'] = os.path.join(RAW_LOGS_DIR, f"{ip}_telnet_session.log")
         device['global_delay_factor'] = 4  # Increase delay factor for old/slow Telnet devices
         
-    log_debug(f"[{ip}] Initializing Netmiko ConnectHandler with device_type={device_type}...")
-    # Establish connection
-    net_connect = ConnectHandler(**device)
-    log_debug(f"[{ip}] Connection established. Prompt detected: {net_connect.find_prompt()}")
+    max_retries = 3
+    retry_delay = 2.0  # Base delay in seconds
+    net_connect = None
     
+    # Connect with exponential backoff
+    for attempt in range(1, max_retries + 1):
+        try:
+            log_debug(f"[{ip}] Initializing Netmiko ConnectHandler with device_type={device_type} (Attempt {attempt}/{max_retries})...")
+            net_connect = ConnectHandler(**device)
+            log_debug(f"[{ip}] Connection established. Prompt detected: {net_connect.find_prompt()}")
+            break
+        except NetmikoAuthenticationException as e:
+            # Do NOT retry authentication failures to avoid locking accounts in enterprise environments
+            print(f"[{ip}] Authentication failed. Bypassing retries to prevent account lockout.")
+            raise e
+        except (NetmikoTimeoutException, ConnectionError, socket.timeout) as e:
+            if attempt == max_retries:
+                print(f"[!] [{ip}] Connection failed after {max_retries} attempts: {e}")
+                raise e
+            sleep_time = retry_delay * (2 ** (attempt - 1))
+            print(f"[*] [{ip}] Connection timeout or socket issue: {e}. Retrying in {sleep_time}s...")
+            time.sleep(sleep_time)
+        except Exception as e:
+            err_msg = str(e).lower()
+            if "timeout" in err_msg or "conn" in err_msg or "reset" in err_msg or "refused" in err_msg:
+                if attempt == max_retries:
+                    print(f"[!] [{ip}] Connection failed after {max_retries} attempts: {e}")
+                    raise e
+                sleep_time = retry_delay * (2 ** (attempt - 1))
+                print(f"[*] [{ip}] Connection exception: {e}. Retrying in {sleep_time}s...")
+                time.sleep(sleep_time)
+            else:
+                raise e
+
     # Send commands to verify OS type
     log_debug(f"[{ip}] Sending 'show version' to detect OS...")
     if conn_type == 'telnet':
@@ -414,15 +456,28 @@ def connect_and_detect(ip, username, password, secret, conn_type="ssh"):
         # XR doesn't use enable secret
         if detected_os == 'cisco_xr' and 'secret' in device:
             del device['secret']
-        net_connect = ConnectHandler(**device)
-        log_debug(f"[{ip}] Connection re-established with driver: {device['device_type']}")
+            
+        # Reconnect with backoff
+        for attempt in range(1, max_retries + 1):
+            try:
+                net_connect = ConnectHandler(**device)
+                log_debug(f"[{ip}] Connection re-established with driver: {device['device_type']}")
+                break
+            except NetmikoAuthenticationException as e:
+                raise e
+            except Exception as e:
+                if attempt == max_retries:
+                    raise e
+                sleep_time = retry_delay * (2 ** (attempt - 1))
+                print(f"[*] [{ip}] Driver re-connection failed. Retrying in {sleep_time}s...")
+                time.sleep(sleep_time)
         
     return net_connect, detected_os
 
 def crawl_device(ip, ports, username, password, secret):
     """
     Performs discovery commands on a single switch.
-    Tries SSH first, falls back to Telnet.
+    Tries SSH first, falls back to Telnet if enabled.
     """
     conn = None
     os_type = None
@@ -432,7 +487,7 @@ def crawl_device(ip, ports, username, password, secret):
     if 22 in ports:
         try:
             print(f"[{ip}] Attempting SSH connection...")
-            conn, os_type = connect_and_detect(ip, username, password, secret, conn_type="ssh")
+            conn, os_type = connect_and_detect(ip, username, password, secret, conn_type="ssh", timeout=TIMEOUT)
             mgmt_method = "SSH"
         except Exception as e:
             err_type = type(e).__name__
@@ -450,30 +505,34 @@ def crawl_device(ip, ports, username, password, secret):
                 else:
                     print(f"[{ip}] SSH connection failed: {err_msg}")
             
-    # Try Telnet fallback if SSH failed or only port 23 is open
+    # Try Telnet fallback if SSH failed or only port 23 is open and Telnet is not disabled
     if not conn and 23 in ports:
-        try:
-            print(f"[{ip}] Attempting Telnet fallback connection...")
-            conn, os_type = connect_and_detect(ip, username, password, secret, conn_type="telnet")
-            mgmt_method = "Telnet"
-        except Exception as e:
-            err_type = type(e).__name__
-            err_msg = str(e).split('\n')[0]
-            if VERBOSE:
-                import traceback
-                print(f"[{ip}] Telnet connection failed with full traceback:\n{traceback.format_exc()}")
-            else:
-                if "Authentication" in err_type or "auth" in err_msg.lower():
-                    print(f"[{ip}] Telnet connection failed: Authentication failed.")
-                elif "Timeout" in err_type or "timed out" in err_msg.lower():
-                    print(f"[{ip}] Telnet connection failed: Connection timed out.")
-                elif "ConnectionRefused" in err_type or "refused" in err_msg.lower():
-                    print(f"[{ip}] Telnet connection failed: Connection refused.")
+        if DISABLE_TELNET:
+            log_debug(f"[{ip}] Telnet port is open but Telnet connections are disabled via policy.")
+        else:
+            try:
+                print(f"[{ip}] Attempting Telnet fallback connection...")
+                conn, os_type = connect_and_detect(ip, username, password, secret, conn_type="telnet", timeout=TIMEOUT)
+                mgmt_method = "Telnet"
+            except Exception as e:
+                err_type = type(e).__name__
+                err_msg = str(e).split('\n')[0]
+                if VERBOSE:
+                    import traceback
+                    print(f"[{ip}] Telnet connection failed with full traceback:\n{traceback.format_exc()}")
                 else:
-                    print(f"[{ip}] Telnet connection failed: {err_msg}")
+                    if "Authentication" in err_type or "auth" in err_msg.lower():
+                        print(f"[{ip}] Telnet connection failed: Authentication failed.")
+                    elif "Timeout" in err_type or "timed out" in err_msg.lower():
+                        print(f"[{ip}] Telnet connection failed: Connection timed out.")
+                    elif "ConnectionRefused" in err_type or "refused" in err_msg.lower():
+                        print(f"[{ip}] Telnet connection failed: Connection refused.")
+                    else:
+                        print(f"[{ip}] Telnet connection failed: {err_msg}")
             
     if not conn:
-        return {"ip": ip, "status": "failed", "reason": "Connection failed (both SSH and Telnet)"}
+        reason = "Connection failed (both SSH and Telnet)" if not DISABLE_TELNET else "Connection failed (SSH failed and Telnet is disabled)"
+        return {"ip": ip, "status": "failed", "reason": reason}
         
     # Device connected! Execute read-only discovery commands
     device_data = {
@@ -665,12 +724,22 @@ def main():
     parser_arg.add_argument("--compare", help="Compare current network state against a baseline JSON file")
     parser_arg.add_argument("--simulate", action="store_true", help="Simulate/mock network scan and switch crawling")
     parser_arg.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging / debug output")
+    parser_arg.add_argument("--disable-telnet", action="store_true", help="Disable Telnet connection fallback completely")
+    parser_arg.add_argument("--threads", type=int, default=10, help="Number of concurrent crawler threads (default: 10)")
+    parser_arg.add_argument("--timeout", type=int, default=10, help="Timeout in seconds for scanning and connections (default: 10)")
     args = parser_arg.parse_args()
     
-    global VERBOSE
+    global VERBOSE, DISABLE_TELNET, TIMEOUT
     VERBOSE = args.verbose
+    DISABLE_TELNET = args.disable_telnet
+    TIMEOUT = args.timeout
+    
     if VERBOSE:
         print("[*] Verbose logging / debug output is ENABLED.")
+    if DISABLE_TELNET:
+        print("[*] Telnet connections are DISABLED.")
+    print(f"[*] Thread count set to {args.threads}.")
+    print(f"[*] Timeout set to {args.timeout} seconds.")
     
     # Download OUI registry if not found
     if not os.path.exists(oui_lookup.OUI_FILE):
@@ -690,7 +759,7 @@ def main():
                 
                 def retry_generator():
                     for ip in targets_ips:
-                        yield {"ip": ip, "mac": "", "ports": [22, 23]}
+                        yield {"ip": ip, "mac": "", "ports": [22] if DISABLE_TELNET else [22, 23]}
                 host_generator = retry_generator()
         except Exception as e:
             print(f"Error reading retry file: {e}")
@@ -702,12 +771,9 @@ def main():
         subnets_input = args.subnets
         if not subnets_input:
             default_sub = "192.168.1.0/24" if args.simulate else local_subnet
-            if sys.stdin.isatty():
-                try:
-                    subnets_input = input(f"Enter target subnets to scan (comma separated) [Default: {default_sub}]: ").strip()
-                except (EOFError, OSError):
-                    subnets_input = ""
-            else:
+            try:
+                subnets_input = input(f"Enter target subnets to scan (comma separated) [Default: {default_sub}]: ").strip()
+            except (EOFError, OSError):
                 subnets_input = ""
             if not subnets_input:
                 subnets_input = default_sub
@@ -735,13 +801,46 @@ def main():
         password = "password"
         secret = "secret"
     else:
-        username = input("Enter SSH/Telnet username: ").strip()
-        if sys.stdin.isatty():
-            password = getpass.getpass("Enter password: ")
-            secret = getpass.getpass("Enter enable secret (press Enter if none): ")
-        else:
-            password = input("Enter password: ").strip()
-            secret = input("Enter enable secret (press Enter if none): ").strip()
+        # Try environment variables first
+        username = os.environ.get("CRAWLER_USER") or os.environ.get("CRAWLER_USERNAME") or ""
+        username = username.strip()
+        
+        password = os.environ.get("CRAWLER_PASSWORD") or ""
+        password = password.strip()
+        
+        secret = os.environ.get("CRAWLER_SECRET") or os.environ.get("CRAWLER_ENABLE_SECRET") or ""
+        secret = secret.strip()
+        
+        try:
+            if username:
+                print(f"[*] Loaded username from environment: {username}")
+            else:
+                username = input("Enter SSH/Telnet username: ").strip()
+                
+            if password:
+                print("[*] Loaded password from environment.")
+            else:
+                if sys.stdin.isatty():
+                    password = getpass.getpass("Enter password: ")
+                else:
+                    password = input("Enter password: ").strip()
+                    
+            if secret:
+                print("[*] Loaded enable secret from environment.")
+            elif not os.environ.get("CRAWLER_USER") and not os.environ.get("CRAWLER_USERNAME"):
+                # Only prompt for optional enable secret in interactive runs
+                if sys.stdin.isatty():
+                    secret = getpass.getpass("Enter enable secret (press Enter if none): ")
+                else:
+                    secret = input("Enter enable secret (press Enter if none): ").strip()
+        except (EOFError, OSError):
+            print("\n[!] EOF or interruption detected while reading credentials.")
+            if not username:
+                username = ""
+            if not password:
+                password = ""
+            if not secret:
+                secret = ""
 
     if not args.retry:
         print("\n--- Phase 2: Subnet Discovery ---")
@@ -768,18 +867,66 @@ def main():
             
     # Validate the credentials entered earlier
     print("\n--- Phase 3: Credentials Validation ---")
-    print(f"[*] Validating credentials on {first_host['ip']}...")
-    while not validate_credentials(first_host["ip"], first_host["ports"], username, password, secret, simulate=args.simulate):
-        print("[!] Credentials validation failed. Please try again.")
-        username = input("Enter SSH/Telnet username: ").strip()
-        if sys.stdin.isatty():
-            password = getpass.getpass("Enter password: ")
-            secret = getpass.getpass("Enter enable secret (press Enter if none): ")
-        else:
-            password = input("Enter password: ").strip()
-            secret = input("Enter enable secret (press Enter if none): ").strip()
-        print(f"[*] Validating credentials on {first_host['ip']}...")
-    print("[+] Credentials verified successfully!")
+    
+    discovered_hosts = [first_host]
+    validated = False
+    
+    while not validated:
+        # Check validation on all hosts we currently have
+        for idx in range(len(discovered_hosts)):
+            host = discovered_hosts[idx]
+            print(f"[*] Validating credentials on {host['ip']}...")
+            if validate_credentials(host["ip"], host["ports"], username, password, secret, simulate=args.simulate):
+                print(f"[+] Credentials verified successfully on {host['ip']}!")
+                validated = True
+                break
+            else:
+                print(f"[-] Credential validation failed on {host['ip']}.")
+        
+        if validated:
+            break
+            
+        # Try to pull remaining hosts from iterator to validate on them
+        try:
+            for host in iterator:
+                discovered_hosts.append(host)
+                print(f"[+] Discovered additional active host: {host['ip']} (Open ports: {host['ports']})")
+                print(f"[*] Validating credentials on {host['ip']}...")
+                if validate_credentials(host["ip"], host["ports"], username, password, secret, simulate=args.simulate):
+                    print(f"[+] Credentials verified successfully on {host['ip']}!")
+                    validated = True
+                    break
+                else:
+                    print(f"[-] Credential validation failed on {host['ip']}.")
+        except Exception as e:
+            print(f"[!] Error during additional host discovery: {e}")
+            
+        if validated:
+            break
+            
+        print("[!] Credentials validation failed on all discovered hosts.")
+        print("This could be due to invalid credentials, or because you are connecting to the wrong device (e.g., home gateway).")
+        if not sys.stdin.isatty():
+            print("[!] Terminal is non-interactive and credentials validation failed. Exiting.")
+            sys.exit(1)
+            
+        try:
+            username = input("Enter SSH/Telnet username (or type 'skip' to bypass validation): ").strip()
+            if username.lower() == 'skip':
+                print("[*] Bypassing credentials validation. Proceeding to scan all discovered hosts...")
+                break
+                
+            if sys.stdin.isatty():
+                password = getpass.getpass("Enter password: ")
+                secret = getpass.getpass("Enter enable secret (press Enter if none): ")
+            else:
+                password = input("Enter password: ").strip()
+                secret = input("Enter enable secret (press Enter if none): ").strip()
+        except (EOFError, OSError):
+            print("\n[!] EOF or interruption detected while reading credentials. Exiting.")
+            sys.exit(1)
+            
+    print("[+] Credentials phase completed.")
     
     print("\n--- Phase 4: Switch Discovery Crawl (Concurrent Scan & Crawl) ---")
     scanned_devices = {}
@@ -814,9 +961,9 @@ def main():
                     failed_devices.append({"ip": ip, "reason": str(e), "status": "failed"})
             finally:
                 crawl_queue.task_done()
-
+ 
     # Thread pool for concurrency
-    num_workers = 10
+    num_workers = args.threads
     workers = []
     for _ in range(num_workers):
         t = threading.Thread(target=crawler_worker)
@@ -824,10 +971,11 @@ def main():
         t.start()
         workers.append(t)
         
-    # Queue the first host immediately
-    crawl_queue.put(first_host)
-    
-    # Feed remaining hosts to queue as they are discovered
+    # Queue all hosts that have been discovered so far
+    for host in discovered_hosts:
+        crawl_queue.put(host)
+        
+    # Feed remaining hosts to queue as they are discovered (if any)
     try:
         for host in iterator:
             crawl_queue.put(host)

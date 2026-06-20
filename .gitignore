@@ -6,6 +6,7 @@ __pycache__/
 # Local outputs & logs
 raw_logs/
 backups/
+deliverables/
 nmap_results.xml
 failed_hosts.json
 asset_inventory.csv
@@ -17,8 +18,10 @@ migration_cabling_matrix.csv
 cisco_to_target_translation.md
 migration_config_variables.json
 migration_verification_report.md
-*.json
 oui.txt
+*.log
+*.cfg
+*.json
 
 # OS specific files
 .DS_Store

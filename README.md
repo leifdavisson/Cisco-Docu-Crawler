@@ -72,6 +72,14 @@ This shell will guide you through checking requirements, installing dependencies
 
 ---
 
+## 📚 Documentation
+
+Detailed guides and manuals are available in the `docs/` directory:
+* **[Junior Network Engineer Quick-Start Guide](docs/junior_engineer_guide.md)**: Walks through basic menu operations, using the simulated demo scan mode, and reading generated topology diagrams and reports.
+* **[Advanced Scripting & Automation Guide](docs/scripting_guide.md)**: Outlines command-line flags, environment variable parameterization, and integration scripts to run the crawler programmatically in cron jobs or CI/CD pipelines.
+
+---
+
 ### Manual CLI Execution (Alternative)
 
 If you prefer to run the scripts manually, follow these steps:

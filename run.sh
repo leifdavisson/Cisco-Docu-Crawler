@@ -28,6 +28,20 @@ clear
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 cd "$DIR"
 
+# Default crawler settings (advanced settings hidden from junior engineers)
+DISABLE_TELNET=false
+THREADS=10
+TIMEOUT=10
+
+get_advanced_flags() {
+    local flags=""
+    if [ "$DISABLE_TELNET" = true ]; then
+        flags="$flags --disable-telnet"
+    fi
+    flags="$flags --threads $THREADS --timeout $TIMEOUT"
+    echo "$flags"
+}
+
 show_header() {
     echo -e "${BLUE}================================================================${NC}"
     echo -e "${GREEN}          Cisco Switch Docu-Crawler - Operator Shell            ${NC}"
@@ -85,29 +99,83 @@ install_dependencies() {
 }
 
 run_discovery() {
-    read -p "Enable verbose logging? (y/N): " verbose_opt
-    VERBOSE_FLAG=""
-    if [[ "$verbose_opt" =~ ^[Yy]$ ]]; then
-        VERBOSE_FLAG="--verbose"
+    if ! read -p "Enable verbose logging? (y/N): " verbose_opt; then
+        exit 0
     fi
+    local verbose_flag=""
+    if [[ "$verbose_opt" =~ ^[Yy]$ ]]; then
+        verbose_flag="--verbose"
+    fi
+    local adv_flags=$(get_advanced_flags)
     echo -e "\n${BLUE}[*] Starting New Network Discovery Scan...${NC}"
-    python3 cisco_crawler.py $VERBOSE_FLAG
+    python3 cisco_crawler.py $verbose_flag $adv_flags
 }
 
 run_simulation() {
-    read -p "Enable verbose logging? (y/N): " verbose_opt
-    VERBOSE_FLAG=""
-    if [[ "$verbose_opt" =~ ^[Yy]$ ]]; then
-        VERBOSE_FLAG="--verbose"
+    if ! read -p "Enable verbose logging? (y/N): " verbose_opt; then
+        exit 0
     fi
+    local verbose_flag=""
+    if [[ "$verbose_opt" =~ ^[Yy]$ ]]; then
+        verbose_flag="--verbose"
+    fi
+    local adv_flags=$(get_advanced_flags)
     echo -e "\n${BLUE}[*] Starting Simulated Network Discovery Scan (Demo Mode)...${NC}"
-    python3 cisco_crawler.py --simulate $VERBOSE_FLAG
+    python3 cisco_crawler.py --simulate $verbose_flag $adv_flags
+}
+
+run_baseline() {
+    if ! read -p "Enter filename to save baseline to (e.g. baseline.json): " baseline_file; then
+        exit 0
+    fi
+    if [ -z "$baseline_file" ]; then
+        echo -e "${RED}[!] Error: Baseline filename cannot be empty.${NC}"
+        return 1
+    fi
+    if ! read -p "Enable verbose logging? (y/N): " verbose_opt; then
+        exit 0
+    fi
+    local verbose_flag=""
+    if [[ "$verbose_opt" =~ ^[Yy]$ ]]; then
+        verbose_flag="--verbose"
+    fi
+    local adv_flags=$(get_advanced_flags)
+    echo -e "\n${BLUE}[*] Starting Baseline Scan...${NC}"
+    python3 cisco_crawler.py --baseline "$baseline_file" $verbose_flag $adv_flags
+}
+
+run_compare() {
+    if ! read -p "Enter baseline file to compare against (e.g. baseline.json): " baseline_file; then
+        exit 0
+    fi
+    if [ ! -f "$baseline_file" ]; then
+        echo -e "${RED}[!] Error: Baseline file '$baseline_file' not found.${NC}"
+        return 1
+    fi
+    if ! read -p "Enable verbose logging? (y/N): " verbose_opt; then
+        exit 0
+    fi
+    local verbose_flag=""
+    if [[ "$verbose_opt" =~ ^[Yy]$ ]]; then
+        verbose_flag="--verbose"
+    fi
+    local adv_flags=$(get_advanced_flags)
+    echo -e "\n${BLUE}[*] Starting Compare Scan against $baseline_file...${NC}"
+    python3 cisco_crawler.py --compare "$baseline_file" $verbose_flag $adv_flags
 }
 
 retry_scan() {
     if [ -f "failed_hosts.json" ]; then
+        if ! read -p "Enable verbose logging? (y/N): " verbose_opt; then
+            exit 0
+        fi
+        local verbose_flag=""
+        if [[ "$verbose_opt" =~ ^[Yy]$ ]]; then
+            verbose_flag="--verbose"
+        fi
+        local adv_flags=$(get_advanced_flags)
         echo -e "\n${BLUE}[*] Resuming scan for failed hosts...${NC}"
-        python3 cisco_crawler.py --retry failed_hosts.json
+        python3 cisco_crawler.py --retry failed_hosts.json $verbose_flag $adv_flags
     else
         echo -e "\n${YELLOW}[!] No failed_hosts.json file found. No previous failed scans to retry.${NC}"
     fi
@@ -125,6 +193,105 @@ list_backups() {
     fi
 }
 
+toggle_telnet() {
+    if [ "$DISABLE_TELNET" = true ]; then
+        DISABLE_TELNET=false
+        echo -e "\n${GREEN}[+] Telnet Fallback enabled.${NC}"
+    else
+        DISABLE_TELNET=true
+        echo -e "\n${GREEN}[+] Telnet Fallback disabled.${NC}"
+    fi
+}
+
+change_threads() {
+    if ! read -p "Enter concurrent thread count (1-50) [Current: $THREADS]: " val; then
+        exit 0
+    fi
+    if [[ "$val" =~ ^[0-9]+$ ]] && [ "$val" -ge 1 ] && [ "$val" -le 50 ]; then
+        THREADS=$val
+        echo -e "\n${GREEN}[+] Concurrent threads set to $THREADS.${NC}"
+    else
+        echo -e "\n${RED}[!] Invalid thread count. Must be an integer between 1 and 50.${NC}"
+    fi
+}
+
+change_timeout() {
+    if ! read -p "Enter connection timeout in seconds (1-120) [Current: $TIMEOUT]: " val; then
+        exit 0
+    fi
+    if [[ "$val" =~ ^[0-9]+$ ]] && [ "$val" -ge 1 ] && [ "$val" -le 120 ]; then
+        TIMEOUT=$val
+        echo -e "\n${GREEN}[+] Connection timeout set to $TIMEOUT seconds.${NC}"
+    else
+        echo -e "\n${RED}[!] Invalid timeout value. Must be an integer between 1 and 120.${NC}"
+    fi
+}
+
+show_advanced_menu() {
+    while true; do
+        clear
+        echo -e "${BLUE}================================================================${NC}"
+        echo -e "${GREEN}          Cisco Switch Docu-Crawler - Advanced Options          ${NC}"
+        echo -e "${BLUE}================================================================${NC}"
+        
+        local telnet_status="${GREEN}ENABLED${NC}"
+        if [ "$DISABLE_TELNET" = true ]; then
+            telnet_status="${RED}DISABLED${NC}"
+        fi
+        
+        echo -e "Current Settings:"
+        echo -e "  - Telnet Fallback: $telnet_status"
+        echo -e "  - Concurrent Threads: ${GREEN}$THREADS${NC}"
+        echo -e "  - Connection Timeout: ${GREEN}$TIMEOUT seconds${NC}"
+        echo -e "----------------------------------------------------------------"
+        echo -e "\n${BLUE}Advanced Operations Menu:${NC}"
+        echo -e "  1) ${GREEN}Save Network State as Baseline${NC}"
+        echo -e "  2) ${GREEN}Compare Current State against Baseline${NC}"
+        echo -e "  3) ${GREEN}Retry/Resume Failed Devices${NC} (Loads failed_hosts.json)"
+        echo -e "  4) ${GREEN}Toggle Telnet Fallback${NC}"
+        echo -e "  5) ${GREEN}Change Thread Count${NC}"
+        echo -e "  6) ${GREEN}Change Connection Timeout${NC}"
+        echo -e "  7) ${RED}Return to Main Menu${NC}"
+        echo -e "----------------------------------------------------------------"
+        
+        if ! read -p "Select option (1-7): " adv_opt; then
+            exit 0
+        fi
+        
+        case $adv_opt in
+            1)
+                run_baseline
+                ;;
+            2)
+                run_compare
+                ;;
+            3)
+                retry_scan
+                ;;
+            4)
+                toggle_telnet
+                ;;
+            5)
+                change_threads
+                ;;
+            6)
+                change_timeout
+                ;;
+            7)
+                return 0
+                ;;
+            *)
+                echo -e "${RED}[!] Invalid option. Please select between 1 and 7.${NC}"
+                ;;
+        esac
+        
+        echo -e "\nPress [Enter] to return to the Advanced Menu..."
+        if ! read; then
+            exit 0
+        fi
+    done
+}
+
 # Main loop
 while true; do
     show_header
@@ -134,12 +301,15 @@ while true; do
     echo -e "  1) ${GREEN}Initialize Environment${NC} (Install Python packages)"
     echo -e "  2) ${GREEN}Run a New Discovery Scan${NC}"
     echo -e "  3) ${GREEN}Run Simulated Discovery (Demo Mode)${NC}"
-    echo -e "  4) ${GREEN}Retry/Resume Failed Devices${NC} (Loads failed_hosts.json)"
-    echo -e "  5) ${GREEN}List Current Backups${NC}"
+    echo -e "  4) ${GREEN}List Current Backups${NC}"
+    echo -e "  5) ${GREEN}Advanced Options Menu${NC}"
     echo -e "  6) ${RED}Exit${NC}"
     echo -e "----------------------------------------------------------------"
     
-    read -p "Select option (1-6): " opt
+    if ! read -p "Select option (1-6): " opt; then
+        echo -e "\nExiting."
+        exit 0
+    fi
     
     case $opt in
         1)
@@ -152,10 +322,10 @@ while true; do
             run_simulation
             ;;
         4)
-            retry_scan
+            list_backups
             ;;
         5)
-            list_backups
+            show_advanced_menu
             ;;
         6)
             echo -e "\n${GREEN}Exiting Operator Shell. Goodbye!${NC}\n"
@@ -167,6 +337,8 @@ while true; do
     esac
     
     echo -e "\nPress [Enter] to return to the menu..."
-    read
+    if ! read; then
+        exit 0
+    fi
     clear
 done

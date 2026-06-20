@@ -38,6 +38,11 @@ $YELLOW = "Yellow"
 $CYAN = "Cyan"
 $WHITE = "White"
 
+# Default crawler settings (advanced settings hidden from junior engineers)
+$global:DisableTelnet = $false
+$global:Threads = 10
+$global:Timeout = 10
+
 function Clear-Console {
     Clear-Host
 }
@@ -241,17 +246,21 @@ function Run-Discovery {
     }
 
     $verboseOpt = Read-Host "Enable verbose logging? (y/N)"
-    $verboseFlag = ""
+    $cmdArgs = @("cisco_crawler.py")
     if ($verboseOpt -match "^[Yy]$") {
-        $verboseFlag = "--verbose"
+        $cmdArgs += "--verbose"
     }
+    if ($global:DisableTelnet) {
+        $cmdArgs += "--disable-telnet"
+    }
+    $cmdArgs += "--threads"
+    $cmdArgs += $global:Threads
+    $cmdArgs += "--timeout"
+    $cmdArgs += $global:Timeout
 
     Write-Host "`n[*] Starting Cisco Network Discovery Scan..." -ForegroundColor Cyan
-    if ($verboseFlag) {
-        & $global:PythonCmd cisco_crawler.py $verboseFlag
-    } else {
-        & $global:PythonCmd cisco_crawler.py
-    }
+    Write-Host "Running: python $($cmdArgs -join ' ')" -ForegroundColor Cyan
+    & $global:PythonCmd $cmdArgs
 }
 
 function Run-Simulation {
@@ -275,17 +284,81 @@ function Run-Simulation {
     }
 
     $verboseOpt = Read-Host "Enable verbose logging? (y/N)"
-    $verboseFlag = ""
+    $cmdArgs = @("cisco_crawler.py", "--simulate")
     if ($verboseOpt -match "^[Yy]$") {
-        $verboseFlag = "--verbose"
+        $cmdArgs += "--verbose"
     }
+    if ($global:DisableTelnet) {
+        $cmdArgs += "--disable-telnet"
+    }
+    $cmdArgs += "--threads"
+    $cmdArgs += $global:Threads
+    $cmdArgs += "--timeout"
+    $cmdArgs += $global:Timeout
 
     Write-Host "`n[*] Starting Simulated Network Discovery Scan (Demo Mode)..." -ForegroundColor Cyan
-    if ($verboseFlag) {
-        & $global:PythonCmd cisco_crawler.py --simulate $verboseFlag
-    } else {
-        & $global:PythonCmd cisco_crawler.py --simulate
+    Write-Host "Running: python $($cmdArgs -join ' ')" -ForegroundColor Cyan
+    & $global:PythonCmd $cmdArgs
+}
+
+function Run-Baseline {
+    if (-not $global:PythonCmd) {
+        Write-Host "[!] Error: Python 3 is required." -ForegroundColor Red
+        return
     }
+    
+    $baselineFile = Read-Host "Enter filename to save baseline to (e.g. baseline.json)"
+    if ([string]::IsNullOrWhiteSpace($baselineFile)) {
+        Write-Host "[!] Error: Baseline filename cannot be empty." -ForegroundColor Red
+        return
+    }
+
+    $verboseOpt = Read-Host "Enable verbose logging? (y/N)"
+    $cmdArgs = @("cisco_crawler.py", "--baseline", $baselineFile)
+    if ($verboseOpt -match "^[Yy]$") {
+        $cmdArgs += "--verbose"
+    }
+    if ($global:DisableTelnet) {
+        $cmdArgs += "--disable-telnet"
+    }
+    $cmdArgs += "--threads"
+    $cmdArgs += $global:Threads
+    $cmdArgs += "--timeout"
+    $cmdArgs += $global:Timeout
+
+    Write-Host "`n[*] Starting Baseline Scan..." -ForegroundColor Cyan
+    Write-Host "Running: python $($cmdArgs -join ' ')" -ForegroundColor Cyan
+    & $global:PythonCmd $cmdArgs
+}
+
+function Run-Compare {
+    if (-not $global:PythonCmd) {
+        Write-Host "[!] Error: Python 3 is required." -ForegroundColor Red
+        return
+    }
+    
+    $baselineFile = Read-Host "Enter baseline file to compare against (e.g. baseline.json)"
+    if (-not (Test-Path $baselineFile)) {
+        Write-Host "[!] Error: Baseline file '$baselineFile' not found." -ForegroundColor Red
+        return
+    }
+
+    $verboseOpt = Read-Host "Enable verbose logging? (y/N)"
+    $cmdArgs = @("cisco_crawler.py", "--compare", $baselineFile)
+    if ($verboseOpt -match "^[Yy]$") {
+        $cmdArgs += "--verbose"
+    }
+    if ($global:DisableTelnet) {
+        $cmdArgs += "--disable-telnet"
+    }
+    $cmdArgs += "--threads"
+    $cmdArgs += $global:Threads
+    $cmdArgs += "--timeout"
+    $cmdArgs += $global:Timeout
+
+    Write-Host "`n[*] Starting Compare Scan against $baselineFile..." -ForegroundColor Cyan
+    Write-Host "Running: python $($cmdArgs -join ' ')" -ForegroundColor Cyan
+    & $global:PythonCmd $cmdArgs
 }
 
 function Retry-Scan {
@@ -295,8 +368,22 @@ function Retry-Scan {
     }
 
     if (Test-Path "failed_hosts.json") {
+        $verboseOpt = Read-Host "Enable verbose logging? (y/N)"
+        $cmdArgs = @("cisco_crawler.py", "--retry", "failed_hosts.json")
+        if ($verboseOpt -match "^[Yy]$") {
+            $cmdArgs += "--verbose"
+        }
+        if ($global:DisableTelnet) {
+            $cmdArgs += "--disable-telnet"
+        }
+        $cmdArgs += "--threads"
+        $cmdArgs += $global:Threads
+        $cmdArgs += "--timeout"
+        $cmdArgs += $global:Timeout
+
         Write-Host "`n[*] Resuming scan for failed hosts using failed_hosts.json..." -ForegroundColor Cyan
-        & $global:PythonCmd cisco_crawler.py --retry failed_hosts.json
+        Write-Host "Running: python $($cmdArgs -join ' ')" -ForegroundColor Cyan
+        & $global:PythonCmd $cmdArgs
     } else {
         Write-Host "`n[!] No failed_hosts.json found. No previous failed scans to resume." -ForegroundColor Yellow
     }
@@ -321,6 +408,90 @@ function List-Backups {
     }
 }
 
+function Toggle-Telnet {
+    if ($global:DisableTelnet) {
+        $global:DisableTelnet = $false
+        Write-Host "`n[+] Telnet Fallback enabled." -ForegroundColor Green
+    } else {
+        $global:DisableTelnet = $true
+        Write-Host "`n[+] Telnet Fallback disabled." -ForegroundColor Green
+    }
+}
+
+function Change-Threads {
+    $val = Read-Host "Enter concurrent thread count (1-50) [Current: $Threads]"
+    if ($val -match "^\d+$" -and [int]$val -ge 1 -and [int]$val -le 50) {
+        $global:Threads = [int]$val
+        Write-Host "`n[+] Concurrent threads set to $Threads." -ForegroundColor Green
+    } else {
+        Write-Host "`n[!] Invalid thread count. Must be an integer between 1 and 50." -ForegroundColor Red
+    }
+}
+
+function Change-Timeout {
+    $val = Read-Host "Enter connection timeout in seconds (1-120) [Current: $Timeout]"
+    if ($val -match "^\d+$" -and [int]$val -ge 1 -and [int]$val -le 120) {
+        $global:Timeout = [int]$val
+        Write-Host "`n[+] Connection timeout set to $Timeout seconds." -ForegroundColor Green
+    } else {
+        Write-Host "`n[!] Invalid timeout value. Must be an integer between 1 and 120." -ForegroundColor Red
+    }
+}
+
+function Show-AdvancedMenu {
+    while ($true) {
+        Clear-Console
+        Write-Host "================================================================" -ForegroundColor Cyan
+        Write-Host "          Cisco Switch Docu-Crawler - Advanced Options          " -ForegroundColor Green
+        Write-Host "================================================================" -ForegroundColor Cyan
+        
+        $telnetStatus = "ENABLED"
+        $telnetColor = "Green"
+        if ($global:DisableTelnet) {
+            $telnetStatus = "DISABLED"
+            $telnetColor = "Red"
+        }
+        
+        Write-Host "Current Settings:"
+        Write-Host "  - Telnet Fallback: " -NoNewline; Write-Host $telnetStatus -ForegroundColor $telnetColor
+        Write-Host "  - Concurrent Threads: " -NoNewline; Write-Host $global:Threads -ForegroundColor Green
+        Write-Host "  - Connection Timeout: " -NoNewline; Write-Host "$($global:Timeout) seconds" -ForegroundColor Green
+        Write-Host "----------------------------------------------------------------"
+        
+        Write-Host "`nAdvanced Operations Menu:" -ForegroundColor Cyan
+        Write-Host "  1) " -NoNewline; Write-Host "Save Network State as Baseline" -ForegroundColor Green
+        Write-Host "  2) " -NoNewline; Write-Host "Compare Current State against Baseline" -ForegroundColor Green
+        Write-Host "  3) " -NoNewline; Write-Host "Retry/Resume Failed Devices" -ForegroundColor Green -NoNewline; Write-Host " (Loads failed_hosts.json)"
+        Write-Host "  4) " -NoNewline; Write-Host "Toggle Telnet Fallback" -ForegroundColor Green
+        Write-Host "  5) " -NoNewline; Write-Host "Change Thread Count" -ForegroundColor Green
+        Write-Host "  6) " -NoNewline; Write-Host "Change Connection Timeout" -ForegroundColor Green
+        Write-Host "  7) " -NoNewline; Write-Host "Install Nmap Utility" -ForegroundColor Green -NoNewline; Write-Host " (Optional)"
+        Write-Host "  8) " -NoNewline; Write-Host "Return to Main Menu" -ForegroundColor Red
+        Write-Host "----------------------------------------------------------------"
+
+        $advSelection = Read-Host "Select option (1-8)"
+
+        switch ($advSelection) {
+            "1" { Run-Baseline }
+            "2" { Run-Compare }
+            "3" { Retry-Scan }
+            "4" { Toggle-Telnet }
+            "5" { Change-Threads }
+            "6" { Change-Timeout }
+            "7" { Install-Nmap }
+            "8" { break }
+            default {
+                Write-Host "[!] Invalid selection. Please choose a number between 1 and 8." -ForegroundColor Red
+            }
+        }
+
+        if ($advSelection -eq "8") { break }
+
+        Write-Host "`nPress [Enter] to return to the Advanced Menu..."
+        Read-Host
+    }
+}
+
 # Main Loop
 while ($true) {
     Clear-Console
@@ -331,31 +502,29 @@ while ($true) {
     Write-Host "  1) " -NoNewline; Write-Host "Initialize Environment" -ForegroundColor Green -NoNewline; Write-Host " (Install Python + Crawler Packages)"
     Write-Host "  2) " -NoNewline; Write-Host "Run New Discovery Scan" -ForegroundColor Green
     Write-Host "  3) " -NoNewline; Write-Host "Run Simulated Discovery (Demo Mode)" -ForegroundColor Green
-    Write-Host "  4) " -NoNewline; Write-Host "Retry/Resume Failed Devices" -ForegroundColor Green -NoNewline; Write-Host " (Loads failed_hosts.json)"
-    Write-Host "  5) " -NoNewline; Write-Host "List Current Backups" -ForegroundColor Green
-    Write-Host "  6) " -NoNewline; Write-Host "Install Nmap Utility" -ForegroundColor Green -NoNewline; Write-Host " (Optional)"
-    Write-Host "  7) " -NoNewline; Write-Host "Exit" -ForegroundColor Red
+    Write-Host "  4) " -NoNewline; Write-Host "List Current Backups" -ForegroundColor Green
+    Write-Host "  5) " -NoNewline; Write-Host "Advanced Options Menu" -ForegroundColor Green
+    Write-Host "  6) " -NoNewline; Write-Host "Exit" -ForegroundColor Red
     Write-Host "----------------------------------------------------------------"
 
-    $selection = Read-Host "Select option (1-7)"
+    $selection = Read-Host "Select option (1-6)"
 
     switch ($selection) {
         "1" { Install-Dependencies }
         "2" { Run-Discovery }
         "3" { Run-Simulation }
-        "4" { Retry-Scan }
-        "5" { List-Backups }
-        "6" { Install-Nmap }
-        "7" { 
+        "4" { List-Backups }
+        "5" { Show-AdvancedMenu }
+        "6" { 
             Write-Host "`nExiting Windows Operator Shell. Goodbye!`n" -ForegroundColor Green
             break
         }
         default {
-            Write-Host "[!] Invalid selection. Please choose a number between 1 and 7." -ForegroundColor Red
+            Write-Host "[!] Invalid selection. Please choose a number between 1 and 6." -ForegroundColor Red
         }
     }
 
-    if ($selection -eq "7") { break }
+    if ($selection -eq "6") { break }
 
     Write-Host "`nPress [Enter] to return to the menu..."
     Read-Host
