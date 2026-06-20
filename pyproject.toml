@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cisco-docu-crawler"
+version = "1.0.0"
+description = "A professional Cisco network switch discovery and operational crawler tool."
+readme = "README.md"
+authors = [
+    { name = "Leif Davisson", email = "leifdavisson@gmail.com" }
+]
+requires-python = ">=3.8"
+dependencies = [
+    "netmiko>=4.0.0",
+    "netaddr>=0.8.0",
+]
+
+[project.scripts]
+cisco-crawler = "cisco_crawler:main"
+
+[tool.setuptools]
+py-modules = ["cisco_crawler", "parser", "report_generator", "oui_lookup"]
