@@ -446,17 +446,23 @@ def generate_l3_diagram(devices, output_path="L3_network_diagrams.md"):
         # 4. Render tree to Mermaid mindmap syntax
         mindmap_lines.append("mindmap")
         
+        node_ids = {n: f"node_{i}" for i, n in enumerate(adj.keys())}
+        
         def render_node(node, indent_level):
             indent = "  " * indent_level
-            safe_text = node.replace('"', '\\"')
+            nid = node_ids.get(node, "node_unknown")
             if node == root_node:
-                shape = f"(({safe_text}))"
+                safe_text = node.replace('"', '\\"')
+                shape = f'{nid}(("{safe_text}"))'
             elif node in device_nodes:
-                shape = f"({safe_text})"
+                safe_text = node.replace('"', '\\"')
+                shape = f'{nid}("{safe_text}")'
             else:
                 vnames = subnet_vlan_names.get(node, set())
                 vname_suffix = f" ({'/'.join(sorted(vnames))})" if vnames else ""
-                shape = f"[Subnet: {safe_text}{vname_suffix}]"
+                full_text = f"Subnet: {node}{vname_suffix}"
+                safe_text = full_text.replace('"', '\\"')
+                shape = f'{nid}["{safe_text}"]'
             mindmap_lines.append(f"{indent}{shape}")
             
         def walk_tree(subtree, indent_level):
@@ -530,6 +536,30 @@ def generate_l3_diagram(devices, output_path="L3_network_diagrams.md"):
                 
     if not vrf_found:
         lines.append("\nNo virtual routing and forwarding (VRF) instances were detected in active device configurations (standard global table only).")
+        
+    lines.extend([
+        "",
+        "## Discovered Routing Tables",
+        "Complete list of discovered IPv4/IPv6 routes per device:"
+    ])
+    routes_found = False
+    for ip, dev in devices.items():
+        hostname = dev.get("hostname") or ip
+        routes = dev.get("routes", [])
+        if routes:
+            routes_found = True
+            lines.append(f"\n### {hostname} Routes:")
+            lines.append("| Subnet | Protocol | Next Hop | Interface |")
+            lines.append("| --- | --- | --- | --- |")
+            for r in routes:
+                subnet = r.get("subnet", "N/A")
+                proto = r.get("protocol", "N/A")
+                next_hop = r.get("next_hop", "N/A")
+                intf = r.get("interface", "N/A")
+                lines.append(f"| {subnet} | {proto} | {next_hop} | {intf} |")
+                
+    if not routes_found:
+        lines.append("\nNo specific routes were parsed or discovered.")
         
     try:
         with open(output_path, "w", encoding="utf-8") as f:
@@ -802,6 +832,26 @@ def generate_network_analysis_report(devices, output_path="network_analysis_repo
             lines.append(f"* **{host}**: Running routing protocols: {', '.join(protos)}")
     else:
         lines.append("  * Devices are operating entirely on Static routing or directly connected Layer 3 boundaries.")
+        
+    lines.append("\n### Detailed Routing Tables")
+    routes_found_na = False
+    for ip, dev in devices.items():
+        hostname = dev.get("hostname") or ip
+        routes = dev.get("routes", [])
+        if routes:
+            routes_found_na = True
+            lines.append(f"\n#### {hostname} Routes:")
+            lines.append("| Subnet | Protocol | Next Hop | Interface |")
+            lines.append("| --- | --- | --- | --- |")
+            for r in routes:
+                subnet = r.get("subnet", "N/A")
+                proto = r.get("protocol", "N/A")
+                next_hop = r.get("next_hop", "N/A")
+                intf = r.get("interface", "N/A")
+                lines.append(f"| {subnet} | {proto} | {next_hop} | {intf} |")
+
+    if not routes_found_na:
+        lines.append("  * No parsed routes discovered across the fleet.")
         
     # 3. Layer 4-7 Services Analysis
     lines.extend([
