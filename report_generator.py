@@ -87,6 +87,122 @@ def get_link_speed(local_port, interfaces_detail):
     return "1G" # Default to 1G if unknown
 
 
+def get_route_details(route):
+    """
+    Extracts subnet, protocol, next_hop, and interface from a route dict,
+    handling different formats (e.g. parsed vs simulated).
+    """
+    # Subnet extraction
+    subnet = route.get("subnet")
+    if not subnet:
+        network = route.get("network")
+        mask = route.get("mask")
+        if network:
+            if mask:
+                subnet = f"{network}/{mask}"
+            else:
+                subnet = network
+        else:
+            subnet = "Unknown"
+            
+    # Protocol extraction
+    protocol = route.get("protocol", "Unknown")
+    proto_map = {'C': 'Connected', 'L': 'Local', 'O': 'OSPF', 'D': 'EIGRP', 'B': 'BGP', 'R': 'RIP', 'S': 'Static', '*': 'Default'}
+    if len(protocol) == 1 and protocol in proto_map:
+        protocol = proto_map[protocol]
+        
+    # Next hop extraction
+    next_hop = route.get("next_hop") or route.get("nexthop") or "Unknown"
+    
+    # Interface extraction
+    interface = route.get("interface") or ""
+    
+    return {
+        "subnet": subnet,
+        "protocol": protocol,
+        "next_hop": next_hop,
+        "interface": interface
+    }
+
+
+def get_unique_devices(devices):
+    """
+    De-duplicates devices based on Serial Number (primary) and Hostname (fallback).
+    If a device was discovered/crawled via multiple SVIs, it only keeps one primary instance.
+    """
+    if not devices:
+        return {}
+        
+    unique_devices = {}
+    seen_serials = set()
+    seen_hostnames = set()
+    
+    # Sort IPs so that we prioritize:
+    # 1. Successful crawls over failed ones
+    # 2. SSH over Telnet
+    # 3. Alphabetical/numerical ordering of IP for determinism
+    def ip_sort_key_internal(ip):
+        if re.match(r'^\d+\.\d+\.\d+\.\d+$', ip):
+            return [int(x) for x in ip.split('.')]
+        return [0]
+        
+    sorted_ips = sorted(
+        devices.keys(),
+        key=lambda ip: (
+            devices[ip].get("status") == "success",
+            devices[ip].get("mgmt_method") == "SSH",
+            ip_sort_key_internal(ip)
+        ),
+        reverse=True
+    )
+    
+    duplicates_info = []
+    
+    for ip in sorted_ips:
+        dev = devices[ip]
+        serial = dev.get("serial")
+        hostname = dev.get("hostname")
+        
+        is_duplicate = False
+        duplicate_reason = ""
+        
+        # Check Serial number uniqueness
+        if serial and serial != "Unknown" and serial.strip():
+            serial_clean = serial.strip().upper()
+            if serial_clean in seen_serials:
+                is_duplicate = True
+                duplicate_reason = f"duplicate serial {serial_clean}"
+            else:
+                seen_serials.add(serial_clean)
+                
+        # Check Hostname uniqueness as fallback
+        if not is_duplicate and hostname and hostname != "Unknown" and hostname.strip():
+            host_clean = hostname.strip().lower()
+            if host_clean in seen_hostnames:
+                is_duplicate = True
+                duplicate_reason = f"duplicate hostname {host_clean}"
+            else:
+                seen_hostnames.add(host_clean)
+                
+        if not is_duplicate:
+            unique_devices[ip] = dev
+        else:
+            duplicates_info.append(f"Discovered duplicate IP {ip} ({hostname}) via {duplicate_reason}. Excluding from deliverables.")
+            
+    if duplicates_info:
+        print("\n--- Duplicate Device Detection (Multiple SVIs) ---")
+        for info in duplicates_info:
+            print(f"  [!] {info}")
+        print(f"  [+] Retained {len(unique_devices)} unique physical devices out of {len(devices)} discovered SVI endpoints.\n")
+        
+    # Return unique devices sorted by IP for consistency
+    def ip_sort_key(ip):
+        if re.match(r'^\d+\.\d+\.\d+\.\d+$', ip):
+            return [int(x) for x in ip.split('.')]
+        return [0]
+    return {ip: unique_devices[ip] for ip in sorted(unique_devices.keys(), key=ip_sort_key)}
+
+
 def generate_asset_inventory(devices, output_path="asset_inventory.csv"):
     """
     Generates the authoritative Asset Inventory CSV.
@@ -170,33 +286,47 @@ def generate_l2_diagram(devices, output_path="L2_network_diagrams.md"):
     link_idx = 0
     link_styles = []
     
+    # Safe alphanumeric IDs mapping for L2 graph to avoid syntax errors with special characters
+    node_ids = {}
+    sw_counter = 0
+    
+    # Pre-populate IDs for all scanned devices
+    for ip, dev in devices.items():
+        hostname = dev.get("hostname") or ip
+        node_ids[hostname] = f"sw_{sw_counter}"
+        sw_counter += 1
+        
     # 1. Define nodes and their styles
     for ip, dev in devices.items():
         hostname = dev.get("hostname") or ip
         model = dev.get("model") or "Unknown"
         is_root = dev.get("stp", {}).get("is_root", False)
         
+        node_id = node_ids[hostname]
         # Node label with Model
-        label = f"[\"{hostname}<br/>({model})\"]"
-        lines.append(f"  {hostname}{label}")
+        safe_hostname = hostname.replace('"', '\\"')
+        safe_model = model.replace('"', '\\"')
+        label = f'["{safe_hostname}<br/>({safe_model})"]'
+        lines.append(f"  {node_id}{label}")
         
         # Apply classes
         model_lower = model.lower()
         hn_lower = hostname.lower()
         if is_root:
-            lines.append(f"  class {hostname} root;")
+            lines.append(f"  class {node_id} root;")
         elif "core" in hn_lower or "c9500" in model_lower:
-            lines.append(f"  class {hostname} core;")
+            lines.append(f"  class {node_id} core;")
         elif "dist" in hn_lower or "c3850" in model_lower or "c9300" in model_lower:
-            lines.append(f"  class {hostname} dist;")
+            lines.append(f"  class {node_id} dist;")
         else:
-            lines.append(f"  class {hostname} access;")
+            lines.append(f"  class {node_id} access;")
             
     lines.append("")
     lines.append("  %% Topology links")
     
     # 2. Draw connections from neighbors
     connections = {}
+    external_nodes_defined = set()
     for ip, dev in devices.items():
         hostname = dev.get("hostname") or ip
         neighbors = dev.get("neighbors", [])
@@ -234,11 +364,25 @@ def generate_l2_diagram(devices, output_path="L2_network_diagrams.md"):
                     
             node_b = matched_remote or remote_host
             
+            # Ensure safe ID exists for node_b
+            if node_b not in node_ids:
+                node_ids[node_b] = f"ext_{len(node_ids)}"
+                
+            node_a_id = node_ids[hostname]
+            node_b_id = node_ids[node_b]
+            
+            # If external and not defined yet, define it
+            if node_b not in devices and node_b not in external_nodes_defined:
+                safe_nb = node_b.replace('"', '\\"')
+                lines.append(f'  {node_b_id}["{safe_nb}"]')
+                lines.append(f'  class {node_b_id} access;') # default class
+                external_nodes_defined.add(node_b)
+            
             # Sort names for link key to prevent duplicates
-            if hostname < node_b:
-                key = (hostname, node_b)
+            if node_a_id < node_b_id:
+                key = (node_a_id, node_b_id)
             else:
-                key = (node_b, hostname)
+                key = (node_b_id, node_a_id)
                 
             if key not in connections:
                 connections[key] = []
@@ -264,7 +408,7 @@ def generate_l2_diagram(devices, output_path="L2_network_diagrams.md"):
                 "port_channel": po_name
             })
             
-    for (node_a, node_b), links in connections.items():
+    for (id_a, id_b), links in connections.items():
         # Determine stp status: blocked if any link in bundle is blocked
         is_blocked = any(lk["is_blocked"] for lk in links)
         
@@ -299,11 +443,11 @@ def generate_l2_diagram(devices, output_path="L2_network_diagrams.md"):
         
         if is_blocked:
             # Dotted red line for blocked paths
-            lines.append(f"  {node_a} -. \"{clean_label}\" .-> {node_b}")
+            lines.append(f'  {id_a} -.->|"{clean_label}"| {id_b}')
             link_styles.append(f"  linkStyle {link_idx} stroke:#ff3333,stroke-width:{thickness},stroke-dasharray: 5 5;")
         else:
             # Thick line with port labels
-            lines.append(f"  {node_a} ===| \"{clean_label}\" | {node_b}")
+            lines.append(f'  {id_a} ==>|"{clean_label}"| {id_b}')
             link_styles.append(f"  linkStyle {link_idx} stroke:#333,stroke-width:{thickness};")
             
         link_idx += 1
@@ -414,63 +558,53 @@ def generate_l3_diagram(devices, output_path="L3_network_diagrams.md"):
                         subnet_vlan_names[clean_ip_base] = set()
                     subnet_vlan_names[clean_ip_base].add(vname)
             
-    mindmap_lines = []
+    diagram_lines = []
     if not adj:
-        mindmap_lines.append("mindmap")
-        mindmap_lines.append("  root((No L3 Interfaces Discovered))")
+        diagram_lines.append("graph TD")
+        diagram_lines.append("  root[\"No L3 Interfaces Discovered\"]")
     else:
-        # 2. Find root node (most connected node)
-        root_node = max(adj.keys(), key=lambda k: len(adj[k]))
+        diagram_lines.append("graph TD")
+        diagram_lines.append("  %% Style configurations")
+        diagram_lines.append("  classDef device fill:#f5f5f5,stroke:#333,stroke-width:2px;")
+        diagram_lines.append("  classDef subnet fill:#e1f5fe,stroke:#0288d1,stroke-width:2px;")
+        diagram_lines.append("")
         
-        # 3. BFS to build tree hierarchy
-        visited = {root_node}
-        
-        def build_subtree(node):
-            subtree = {}
-            # Sort neighbors by degree (most connected first)
-            neighbors = sorted(adj[node], key=lambda k: len(adj[k]), reverse=True)
-            for neighbor in neighbors:
-                if neighbor not in visited:
-                    visited.add(neighbor)
-                    subtree[neighbor] = build_subtree(neighbor)
-            return subtree
+        # Pre-populate safe IDs for all nodes
+        node_ids = {}
+        counter = 0
+        for sub in sorted(list(subnets)):
+            node_ids[sub] = f"sub_{counter}"
+            counter += 1
+        for dev in sorted(list(device_nodes)):
+            node_ids[dev] = f"dev_{counter}"
+            counter += 1
             
-        tree = {root_node: build_subtree(root_node)}
-        
-        # Add any disconnected components
-        for node in adj.keys():
-            if node not in visited:
-                visited.add(node)
-                tree[root_node][node] = build_subtree(node)
-                
-        # 4. Render tree to Mermaid mindmap syntax
-        mindmap_lines.append("mindmap")
-        
-        node_ids = {n: f"node_{i}" for i, n in enumerate(adj.keys())}
-        
-        def render_node(node, indent_level):
-            indent = "  " * indent_level
-            nid = node_ids.get(node, "node_unknown")
-            if node == root_node:
-                safe_text = node.replace('"', '\\"')
-                shape = f'{nid}(("{safe_text}"))'
-            elif node in device_nodes:
-                safe_text = node.replace('"', '\\"')
-                shape = f'{nid}("{safe_text}")'
-            else:
-                vnames = subnet_vlan_names.get(node, set())
-                vname_suffix = f" ({'/'.join(sorted(vnames))})" if vnames else ""
-                full_text = f"Subnet: {node}{vname_suffix}"
-                safe_text = full_text.replace('"', '\\"')
-                shape = f'{nid}["{safe_text}"]'
-            mindmap_lines.append(f"{indent}{shape}")
+        # Define Subnets (stadium oval: ([...]))
+        diagram_lines.append("  %% Subnets (Ovals)")
+        for sub in sorted(list(subnets)):
+            node_id = node_ids[sub]
+            vnames = subnet_vlan_names.get(sub, set())
+            vname_suffix = f" ({'/'.join(sorted(vnames))})" if vnames else ""
+            label = f"{sub}{vname_suffix}"
+            safe_label = label.replace('"', '\\"')
+            diagram_lines.append(f'  {node_id}(["{safe_label}"])')
+            diagram_lines.append(f'  class {node_id} subnet;')
             
-        def walk_tree(subtree, indent_level):
-            for node, children in subtree.items():
-                render_node(node, indent_level)
-                walk_tree(children, indent_level + 1)
-                
-        walk_tree(tree, 1)
+        # Define Devices (square: [...])
+        diagram_lines.append("\n  %% Devices (Squares)")
+        for dev in sorted(list(device_nodes)):
+            node_id = node_ids[dev]
+            safe_dev = dev.replace('"', '\\"')
+            diagram_lines.append(f'  {node_id}["{safe_dev}"]')
+            diagram_lines.append(f'  class {node_id} device;')
+            
+        # Draw Links
+        diagram_lines.append("\n  %% Connectivity Links")
+        for dev in sorted(list(device_nodes)):
+            dev_id = node_ids[dev]
+            for sub in sorted(list(adj.get(dev, []))):
+                sub_id = node_ids[sub]
+                diagram_lines.append(f"  {dev_id} --- {sub_id}")
 
     lines = [
         "# Layer 3 & Logical Network Diagrams",
@@ -479,7 +613,7 @@ def generate_l3_diagram(devices, output_path="L3_network_diagrams.md"):
         "",
         "## Logical Routing Boundary Diagram",
         "```mermaid",
-        "\n".join(mindmap_lines),
+        "\n".join(diagram_lines),
         "```",
         "",
         "## Authoritative VLAN, Subnet & SVI Map",
@@ -537,29 +671,45 @@ def generate_l3_diagram(devices, output_path="L3_network_diagrams.md"):
     if not vrf_found:
         lines.append("\nNo virtual routing and forwarding (VRF) instances were detected in active device configurations (standard global table only).")
         
+    # Complete Routing Tables
     lines.extend([
         "",
         "## Discovered Routing Tables",
-        "Complete list of discovered IPv4/IPv6 routes per device:"
+        "The following table lists the active routing entries parsed from each device's routing table:"
     ])
-    routes_found = False
+    
+    has_routes = False
     for ip, dev in devices.items():
         hostname = dev.get("hostname") or ip
         routes = dev.get("routes", [])
         if routes:
-            routes_found = True
-            lines.append(f"\n### {hostname} Routes:")
-            lines.append("| Subnet | Protocol | Next Hop | Interface |")
-            lines.append("| --- | --- | --- | --- |")
+            if not has_routes:
+                lines.append("")
+                lines.append("| Switch Hostname | Route Prefix / Subnet | Protocol | Next Hop IP | Outgoing Interface |")
+                lines.append("| --- | --- | --- | --- | --- |")
+                has_routes = True
+            
+            sorted_routes = []
             for r in routes:
-                subnet = r.get("subnet", "N/A")
-                proto = r.get("protocol", "N/A")
-                next_hop = r.get("next_hop", "N/A")
-                intf = r.get("interface", "N/A")
-                lines.append(f"| {subnet} | {proto} | {next_hop} | {intf} |")
+                sorted_routes.append(get_route_details(r))
                 
-    if not routes_found:
-        lines.append("\nNo specific routes were parsed or discovered.")
+            def route_sort_key(rt):
+                sub = rt["subnet"]
+                if sub == "0.0.0.0/0" or sub.startswith("0.0.0.0"):
+                    return (0, "")
+                try:
+                    ip_net = IPNetwork(sub)
+                    return (1, ip_net)
+                except Exception:
+                    return (2, sub)
+                    
+            sorted_routes.sort(key=route_sort_key)
+            
+            for rt in sorted_routes:
+                lines.append(f"| {hostname} | `{rt['subnet']}` | {rt['protocol']} | {rt['next_hop']} | {rt['interface'] or 'N/A'} |")
+                
+    if not has_routes:
+        lines.append("\nNo routing table entries were parsed or simulated for the scanned devices.")
         
     try:
         with open(output_path, "w", encoding="utf-8") as f:
@@ -823,7 +973,8 @@ def generate_network_analysis_report(devices, output_path="network_analysis_repo
     for ip, dev in devices.items():
         hostname = dev.get("hostname") or ip
         routes = dev.get("routes", [])
-        protocols = list(set([r.get("protocol") for r in routes if r.get("protocol")]))
+        protocols = list(set([get_route_details(r)["protocol"] for r in routes]))
+        protocols = [p for p in protocols if p and p != "Unknown"]
         if protocols:
             routes_summary[hostname] = protocols
             
@@ -833,25 +984,39 @@ def generate_network_analysis_report(devices, output_path="network_analysis_repo
     else:
         lines.append("  * Devices are operating entirely on Static routing or directly connected Layer 3 boundaries.")
         
-    lines.append("\n### Detailed Routing Tables")
-    routes_found_na = False
+    # Complete Routing Tables
+    lines.append("\n### Complete Routing Tables")
+    has_routes_any = False
     for ip, dev in devices.items():
         hostname = dev.get("hostname") or ip
         routes = dev.get("routes", [])
         if routes:
-            routes_found_na = True
-            lines.append(f"\n#### {hostname} Routes:")
-            lines.append("| Subnet | Protocol | Next Hop | Interface |")
+            has_routes_any = True
+            lines.append(f"\n#### {hostname} Routing Table:")
+            lines.append("| Route Prefix | Protocol | Next Hop / Gateway | Outgoing Interface |")
             lines.append("| --- | --- | --- | --- |")
+            
+            sorted_routes = []
             for r in routes:
-                subnet = r.get("subnet", "N/A")
-                proto = r.get("protocol", "N/A")
-                next_hop = r.get("next_hop", "N/A")
-                intf = r.get("interface", "N/A")
-                lines.append(f"| {subnet} | {proto} | {next_hop} | {intf} |")
-
-    if not routes_found_na:
-        lines.append("  * No parsed routes discovered across the fleet.")
+                sorted_routes.append(get_route_details(r))
+            
+            def route_sort_key(rt):
+                sub = rt["subnet"]
+                if sub == "0.0.0.0/0" or sub.startswith("0.0.0.0"):
+                    return (0, "")
+                try:
+                    ip_net = IPNetwork(sub)
+                    return (1, ip_net)
+                except Exception:
+                    return (2, sub)
+                    
+            sorted_routes.sort(key=route_sort_key)
+            
+            for rt in sorted_routes:
+                lines.append(f"| `{rt['subnet']}` | {rt['protocol']} | {rt['next_hop']} | {rt['interface'] or 'N/A'} |")
+                
+    if not has_routes_any:
+        lines.append("  * No routing table entries were parsed or simulated for the scanned devices.")
         
     # 3. Layer 4-7 Services Analysis
     lines.extend([
@@ -1237,7 +1402,8 @@ def generate_config_variables(devices, output_path="migration_config_variables.j
             "tacacs_servers": services.get("tacacs_servers", []),
             "vlans": vlans_list,
             "l3_interfaces": svis_list,
-            "interfaces": interfaces_list
+            "interfaces": interfaces_list,
+            "routes": [get_route_details(r) for r in dev.get("routes", [])]
         }
         
     try:
@@ -1272,7 +1438,11 @@ def save_baseline_state(devices, output_path):
             })
             
         # Route prefixes
-        routes = [r.get("prefix") for r in dev.get("routes", []) if r.get("prefix")]
+        routes = []
+        for r in dev.get("routes", []):
+            details = get_route_details(r)
+            if details["subnet"] and details["subnet"] != "Unknown":
+                routes.append(details["subnet"])
         
         # SVI / L3 Interface states
         svis = {}
@@ -1407,7 +1577,11 @@ def compare_baseline_state(devices, baseline_path, output_path="migration_verifi
             
         # 4. Compare Routing table prefixes
         base_routes = set(base_state.get("routes", []))
-        curr_routes = set([r.get("prefix") for r in current_dev.get("routes", []) if r.get("prefix")])
+        curr_routes = set()
+        for r in current_dev.get("routes", []):
+            details = get_route_details(r)
+            if details["subnet"] and details["subnet"] != "Unknown":
+                curr_routes.add(details["subnet"])
         
         missing_routes = base_routes - curr_routes
         if missing_routes:

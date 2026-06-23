@@ -44,6 +44,11 @@ VERBOSE = False
 DISABLE_TELNET = False
 TIMEOUT = 10
 
+# Shared thread-safe sets for scanner-level SVI duplicate detection
+scanned_serials = set()
+scanned_hostnames = set()
+scanner_dup_lock = threading.Lock()
+
 def log_debug(msg):
     if VERBOSE:
         print(f"[DEBUG] {msg}")
@@ -251,8 +256,8 @@ def run_simulation_scan(subnets):
             # Pick a few sample IP addresses from the network to "discover"
             ips = []
             if len(net) > 50:
-                # E.g. pick indices 10, 20, 30, 100
-                ips = [str(net[10]), str(net[20]), str(net[30]), str(net[100])]
+                # E.g. pick indices 10, 20, 30, 100, 101 (where 101 simulates a duplicate SVI of 100)
+                ips = [str(net[10]), str(net[20]), str(net[30]), str(net[100]), str(net[101])]
             elif len(net) > 5:
                 ips = [str(net[i]) for i in range(1, min(5, len(net) - 1))]
             else:
@@ -263,7 +268,12 @@ def run_simulation_scan(subnets):
             for ip in ips:
                 time.sleep(0.1) # Simulate real-time discovery delay
                 print(f"  Discovered active host (simulated): {ip} (Open ports: {sim_ports})")
-                yield {"ip": ip, "mac": f"00:11:22:33:44:{hash(ip) & 0xff:02x}", "ports": sim_ports}
+                # Generate deterministic MAC address using the last octet of the IP
+                ip_parts = ip.split('.')
+                last_octet = int(ip_parts[3])
+                if last_octet == 101:
+                    last_octet = 100
+                yield {"ip": ip, "mac": f"00:11:22:33:44:{last_octet:02x}", "ports": sim_ports}
         except Exception as e:
             print(f"Invalid subnet range ignored in simulation: {subnet} ({e})")
 
@@ -275,9 +285,11 @@ def crawl_device_simulated(ip):
     print(f"[{ip}] Simulating Switch discovery crawl...")
     time.sleep(0.5) # Simulate CLI delay
     
-    # Generate stable mock data using hash of IP
-    h = hash(ip)
-    last_octet = h & 0xff
+    # Generate stable mock data using IP octet to keep it deterministic
+    ip_parts = ip.split('.')
+    last_octet = int(ip_parts[3])
+    if last_octet == 101:
+        last_octet = 100
     mac = f"00:1a:a1:b2:c3:{last_octet:02x}"
     
     # Generate mock neighbor IP addresses
@@ -297,6 +309,32 @@ def crawl_device_simulated(ip):
     hostname = f"sim-switch-{last_octet}"
     serial = f"FDO{last_octet:03d}X{last_octet:02d}Y"
     
+    # Check for duplicate SVI (early abort)
+    is_duplicate = False
+    duplicate_reason = ""
+    with scanner_dup_lock:
+        if serial in scanned_serials:
+            is_duplicate = True
+            duplicate_reason = f"serial {serial}"
+        else:
+            scanned_serials.add(serial)
+            
+        if not is_duplicate and hostname in scanned_hostnames:
+            is_duplicate = True
+            duplicate_reason = f"hostname {hostname}"
+        else:
+            scanned_hostnames.add(hostname)
+            
+    if is_duplicate:
+        print(f"[{ip}] Duplicate switch detected early via {duplicate_reason} (simulated). Aborting scan.")
+        return {
+            "ip": ip,
+            "status": "duplicate",
+            "reason": f"Duplicate switch (SVI endpoint) of already scanned device ({duplicate_reason})",
+            "hostname": hostname,
+            "serial": serial
+        }
+        
     device_data = {
         "ip": ip,
         "status": "success",
@@ -341,8 +379,8 @@ def crawl_device_simulated(ip):
             }
         },
         "routes": [
-            {"protocol": "C", "network": f"{ip_parts[0]}.{ip_parts[1]}.{ip_parts[2]}.0", "mask": "24", "nexthop": "Directly Connected", "interface": "Vlan10"},
-            {"protocol": "O", "network": "0.0.0.0", "mask": "0", "nexthop": f"{ip_parts[0]}.{ip_parts[1]}.{ip_parts[2]}.1", "interface": "Vlan10"}
+            {"subnet": f"{ip_parts[0]}.{ip_parts[1]}.{ip_parts[2]}.0/24", "protocol": "Connected", "next_hop": "Directly Connected", "interface": "Vlan10"},
+            {"subnet": "0.0.0.0/0", "protocol": "OSPF", "next_hop": f"{ip_parts[0]}.{ip_parts[1]}.{ip_parts[2]}.1", "interface": "Vlan10"}
         ],
         "services": {
             "dns_servers": ["8.8.8.8", "8.8.4.4"],
@@ -612,6 +650,45 @@ def crawl_device(ip, ports, username, password, secret):
         if not device_data["hostname"]:
             device_data["hostname"] = conn.find_prompt().replace('#', '').replace('>', '').strip()
             log_debug(f"[{ip}] Hostname defaulted from prompt: {device_data['hostname']}")
+            
+        # Check for duplicate SVI (early abort)
+        is_duplicate = False
+        duplicate_reason = ""
+        serial = device_data.get("serial")
+        hostname = device_data.get("hostname")
+        
+        with scanner_dup_lock:
+            # Check serial first
+            if serial and serial != "Unknown" and serial.strip():
+                serial_clean = serial.strip().upper()
+                if serial_clean in scanned_serials:
+                    is_duplicate = True
+                    duplicate_reason = f"serial {serial_clean}"
+                else:
+                    scanned_serials.add(serial_clean)
+                    
+            # Check hostname fallback
+            if not is_duplicate and hostname and hostname != "Unknown" and hostname.strip():
+                host_clean = hostname.strip().lower()
+                if host_clean in scanned_hostnames:
+                    is_duplicate = True
+                    duplicate_reason = f"hostname {host_clean}"
+                else:
+                    scanned_hostnames.add(host_clean)
+                    
+        if is_duplicate:
+            print(f"[{ip}] Duplicate switch detected early via {duplicate_reason}. Aborting scan.")
+            try:
+                conn.disconnect()
+            except Exception:
+                pass
+            return {
+                "ip": ip,
+                "status": "duplicate",
+                "reason": f"Duplicate switch (SVI endpoint) of already scanned device ({duplicate_reason})",
+                "hostname": hostname,
+                "serial": serial
+            }
             
         # 3. Interfaces L3 list
         sh_ip_int_cmd = 'show ipv4 interface brief' if os_type == 'cisco_xr' else 'show ip interface brief'
@@ -929,8 +1006,11 @@ def main():
     print("[+] Credentials phase completed.")
     
     print("\n--- Phase 4: Switch Discovery Crawl (Concurrent Scan & Crawl) ---")
+    scanned_serials.clear()
+    scanned_hostnames.clear()
     scanned_devices = {}
     failed_devices = []
+    duplicate_devices = []
     devices_lock = threading.Lock()
     crawl_queue = queue.Queue()
     
@@ -953,6 +1033,8 @@ def main():
                     elif res["status"] == "partial":
                          scanned_devices[ip] = res
                          failed_devices.append({"ip": ip, "reason": res["reason"], "status": "partial"})
+                    elif res["status"] == "duplicate":
+                         duplicate_devices.append({"ip": ip, "reason": res["reason"], "status": "duplicate"})
                     else:
                          failed_devices.append({"ip": ip, "reason": res["reason"], "status": "failed"})
             except Exception as e:
@@ -1005,6 +1087,9 @@ def main():
     # Generate Deliverables
     print("\n--- Phase 5: Generating Deliverables ---")
     if scanned_devices:
+        # Filter duplicate switches crawled via different SVIs (keep one primary device)
+        scanned_devices = report_generator.get_unique_devices(scanned_devices)
+        
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         deliv_dir = os.path.join("deliverables", f"run_{timestamp}")
         inv_dir = os.path.join(deliv_dir, "inventory")
@@ -1076,6 +1161,7 @@ def main():
     print("\nNetwork Discovery Complete!")
     print(f"Successfully Scanned: {len(scanned_devices)}")
     print(f"Failed/Partial Scanned: {len(failed_ips_list)}")
+    print(f"Duplicate SVI Aborts: {len(duplicate_devices)}")
 
 if __name__ == "__main__":
     main()
